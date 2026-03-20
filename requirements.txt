@@ -1,4 +1,4 @@
-dash
-plotly
-pandas
+dash==4.0.0
+plotly==6.6.0
+pandas==2.2.3
 
