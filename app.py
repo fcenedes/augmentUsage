@@ -1,25 +1,33 @@
-from dash import Dash, html, dcc, Input, Output
+from dash import Dash, html, dcc, Input, Output, State, callback_context
 import plotly.express as px
 import plotly.graph_objects as go
 import pandas as pd
-from data_loader import load_sessions
+from data_loader import load_sessions, fetch_pricing, compute_cost, MODEL_ID_MAP
 
 # ---------------------------------------------------------------------------
 # Data
 # ---------------------------------------------------------------------------
-df = load_sessions()
-
-# Ensure numeric columns are numeric
 TOKEN_COLS = [
     "input_tokens", "output_tokens", "cache_read_input_tokens",
     "cache_creation_input_tokens", "system_prompt_tokens", "chat_history_tokens",
     "current_message_tokens", "max_context_tokens", "tool_definitions_tokens",
     "tool_result_tokens", "assistant_response_tokens",
 ]
-for col in TOKEN_COLS:
-    df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
 
-df = df.sort_values("finished_at").reset_index(drop=True)
+
+def _load_and_prepare() -> tuple[pd.DataFrame, dict]:
+    """Load sessions, clean numeric columns, compute costs, return (df, pricing)."""
+    df = load_sessions()
+    pricing = fetch_pricing()
+    for col in TOKEN_COLS:
+        df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
+    df = df.sort_values("finished_at").reset_index(drop=True)
+    # Compute per-exchange cost
+    df["cost_usd"] = df.apply(lambda r: compute_cost(r, pricing), axis=1)
+    return df, pricing
+
+
+df, pricing = _load_and_prepare()
 
 # ---------------------------------------------------------------------------
 # App
@@ -74,13 +82,12 @@ app.layout = html.Div(
             "Augment Session Dashboard",
             style={"textAlign": "center", "marginBottom": "4px", "color": "#fff"},
         ),
-        html.P(
-            f"{len(df)} exchanges across {df['session_id'].nunique()} sessions",
-            style={"textAlign": "center", "color": "#888", "marginBottom": "20px"},
-        ),
-        # Date range picker
+
+        # Hidden store for refresh trigger
+        dcc.Store(id="refresh-trigger", data=0),
+        # Date range picker + refresh button
         html.Div(
-            style={"display": "flex", "justifyContent": "center", "marginBottom": "20px"},
+            style={"display": "flex", "justifyContent": "center", "alignItems": "center", "marginBottom": "20px", "gap": "12px"},
             children=[
                 html.Label("Date range: ", style={"marginRight": "8px", "paddingTop": "6px"}),
                 dcc.DatePickerRange(
@@ -91,7 +98,26 @@ app.layout = html.Div(
                     end_date=df["finished_at"].max() if not df.empty else None,
                     style={"backgroundColor": "#1e1e2f"},
                 ),
+                html.Button(
+                    "🔄 Refresh Data",
+                    id="refresh-btn",
+                    n_clicks=0,
+                    style={
+                        "backgroundColor": "#3a3a5c",
+                        "color": "#fff",
+                        "border": "1px solid #555",
+                        "borderRadius": "6px",
+                        "padding": "8px 16px",
+                        "cursor": "pointer",
+                        "fontSize": "0.9rem",
+                    },
+                ),
             ],
+        ),
+        # Subtitle (updated on refresh)
+        html.P(
+            id="subtitle",
+            style={"textAlign": "center", "color": "#888", "marginBottom": "20px"},
         ),
         # Summary cards
         html.Div(
@@ -103,6 +129,7 @@ app.layout = html.Div(
                 make_card("Input Tokens", "card-input"),
                 make_card("Output Tokens", "card-output"),
                 make_card("Cache Read Tokens", "card-cache"),
+                make_card("Estimated Cost", "card-cost"),
             ],
         ),
         # Charts row 1
@@ -121,7 +148,15 @@ app.layout = html.Div(
                 html.Div(dcc.Graph(id="model-pie"), style={"flex": "1", "minWidth": "400px"}),
             ],
         ),
-        # Charts row 3
+        # Charts row 3 – Cost charts
+        html.Div(
+            style={"display": "flex", "gap": "16px", "flexWrap": "wrap", "marginBottom": "24px"},
+            children=[
+                html.Div(dcc.Graph(id="cost-time"), style={"flex": "1", "minWidth": "400px"}),
+                html.Div(dcc.Graph(id="cost-model"), style={"flex": "1", "minWidth": "400px"}),
+            ],
+        ),
+        # Charts row 4
         html.Div(
             style={"display": "flex", "justifyContent": "center", "marginBottom": "24px"},
             children=[
@@ -144,26 +179,60 @@ def _filter(start, end):
     return dff
 
 
+def _fmt_cost(v: float) -> str:
+    """Format a USD cost value."""
+    if v >= 1000:
+        return f"${v:,.0f}"
+    if v >= 1:
+        return f"${v:.2f}"
+    return f"${v:.4f}"
+
+
+# ---------------------------------------------------------------------------
+# Callback: Refresh data
+# ---------------------------------------------------------------------------
+@app.callback(
+    Output("refresh-trigger", "data"),
+    Input("refresh-btn", "n_clicks"),
+    prevent_initial_call=True,
+)
+def refresh_data(n_clicks):
+    global df, pricing
+    df, pricing = _load_and_prepare()
+    return n_clicks
+
+
 # ---------------------------------------------------------------------------
 # Callbacks
 # ---------------------------------------------------------------------------
 @app.callback(
     [
+        Output("subtitle", "children"),
         Output("card-sessions", "children"),
         Output("card-exchanges", "children"),
         Output("card-input", "children"),
         Output("card-output", "children"),
         Output("card-cache", "children"),
+        Output("card-cost", "children"),
         Output("token-time", "figure"),
         Output("token-breakdown", "figure"),
         Output("session-bar", "figure"),
         Output("model-pie", "figure"),
+        Output("cost-time", "figure"),
+        Output("cost-model", "figure"),
         Output("cache-efficiency", "figure"),
     ],
-    [Input("date-range", "start_date"), Input("date-range", "end_date")],
+    [
+        Input("date-range", "start_date"),
+        Input("date-range", "end_date"),
+        Input("refresh-trigger", "data"),
+    ],
 )
-def update_dashboard(start_date, end_date):
+def update_dashboard(start_date, end_date, _refresh):
     dff = _filter(start_date, end_date)
+
+    # --- Subtitle ---
+    subtitle = f"{len(dff)} exchanges across {dff['session_id'].nunique()} sessions"
 
     # --- Summary cards ---
     n_sessions = dff["session_id"].nunique()
@@ -171,6 +240,7 @@ def update_dashboard(start_date, end_date):
     total_input = int(dff["input_tokens"].sum())
     total_output = int(dff["output_tokens"].sum())
     total_cache = int(dff["cache_read_input_tokens"].sum())
+    total_cost = dff["cost_usd"].sum()
 
     # --- 1. Token usage over time ---
     fig_time = go.Figure()
@@ -209,9 +279,9 @@ def update_dashboard(start_date, end_date):
         margin=dict(l=140, r=20, t=40, b=40),
     )
 
-    # --- 3. Per-session summary (top 20) ---
+    # --- 3. Per-session summary (top 20) with cost ---
     session_totals = (
-        dff.groupby("session_id")[["input_tokens", "output_tokens"]]
+        dff.groupby("session_id")[["input_tokens", "output_tokens", "cost_usd"]]
         .sum()
         .assign(total=lambda x: x["input_tokens"] + x["output_tokens"])
         .nlargest(20, "total")
@@ -228,12 +298,21 @@ def update_dashboard(start_date, end_date):
         x=session_totals["output_tokens"], name="Output",
         orientation="h", marker_color="#EF553B",
     ))
+    # Add cost as text annotation
     fig_session.update_layout(
         template=PLOT_TEMPLATE, title="Top 20 Sessions by Total Tokens",
         barmode="stack", xaxis_title="Tokens", yaxis_title="Session",
         paper_bgcolor="#1e1e2f", plot_bgcolor="#1e1e2f",
-        margin=dict(l=110, r=20, t=40, b=40), legend=dict(orientation="h", y=-0.15),
+        margin=dict(l=110, r=80, t=40, b=40), legend=dict(orientation="h", y=-0.15),
     )
+    # Add cost annotations on the right side of bars
+    for i, (sid, row) in enumerate(session_totals.iterrows()):
+        fig_session.add_annotation(
+            x=row["total"], y=str(sid)[:12],
+            text=f" {_fmt_cost(row['cost_usd'])}",
+            showarrow=False, xanchor="left",
+            font=dict(color="#00CC96", size=10),
+        )
 
     # --- 4. Model usage (donut) ---
     model_totals = (
@@ -255,7 +334,42 @@ def update_dashboard(start_date, end_date):
         margin=dict(l=20, r=20, t=40, b=40),
     )
 
-    # --- 5. Cache efficiency ---
+    # --- 5. Cost over time (cumulative line) ---
+    fig_cost_time = go.Figure()
+    if not dff.empty:
+        dff_sorted = dff.sort_values("finished_at")
+        cumulative_cost = dff_sorted["cost_usd"].cumsum()
+        fig_cost_time.add_trace(go.Scatter(
+            x=dff_sorted["finished_at"], y=cumulative_cost,
+            mode="lines", name="Cumulative Cost",
+            line=dict(color="#AB63FA", width=2),
+            fill="tozeroy", fillcolor="rgba(171,99,250,0.15)",
+        ))
+    fig_cost_time.update_layout(
+        template=PLOT_TEMPLATE, title="Cumulative Estimated Cost Over Time",
+        xaxis_title="Time", yaxis_title="Cost (USD)",
+        paper_bgcolor="#1e1e2f", plot_bgcolor="#1e1e2f",
+        margin=dict(l=60, r=20, t=40, b=40),
+    )
+
+    # --- 6. Cost by model (bar) ---
+    model_costs = dff.groupby("model_id")["cost_usd"].sum().sort_values(ascending=True)
+    fig_cost_model = go.Figure(go.Bar(
+        y=model_costs.index,
+        x=model_costs.values,
+        orientation="h",
+        marker_color="#AB63FA",
+        text=[_fmt_cost(v) for v in model_costs.values],
+        textposition="auto",
+    ))
+    fig_cost_model.update_layout(
+        template=PLOT_TEMPLATE, title="Estimated Cost by Model",
+        xaxis_title="Cost (USD)", yaxis_title="",
+        paper_bgcolor="#1e1e2f", plot_bgcolor="#1e1e2f",
+        margin=dict(l=140, r=20, t=40, b=40),
+    )
+
+    # --- 7. Cache efficiency ---
     fig_cache = go.Figure()
     fig_cache.add_trace(go.Scatter(
         x=dff["finished_at"], y=dff["cache_read_input_tokens"],
@@ -273,9 +387,12 @@ def update_dashboard(start_date, end_date):
     )
 
     return (
+        subtitle,
         _fmt(n_sessions), _fmt(n_exchanges),
         _fmt(total_input), _fmt(total_output), _fmt(total_cache),
-        fig_time, fig_breakdown, fig_session, fig_model, fig_cache,
+        _fmt_cost(total_cost),
+        fig_time, fig_breakdown, fig_session, fig_model,
+        fig_cost_time, fig_cost_model, fig_cache,
     )
 
 
