@@ -1,6 +1,7 @@
 from dash import Dash, html, dcc, Input, Output, State, callback_context
 import plotly.express as px
 import plotly.graph_objects as go
+import numpy as np
 import pandas as pd
 from data_loader import load_sessions, fetch_pricing, compute_cost, MODEL_ID_MAP
 
@@ -192,14 +193,22 @@ def _fmt_cost(v: float) -> str:
 # Callback: Refresh data
 # ---------------------------------------------------------------------------
 @app.callback(
-    Output("refresh-trigger", "data"),
+    [
+        Output("refresh-trigger", "data"),
+        Output("date-range", "min_date_allowed"),
+        Output("date-range", "max_date_allowed"),
+        Output("date-range", "start_date"),
+        Output("date-range", "end_date"),
+    ],
     Input("refresh-btn", "n_clicks"),
     prevent_initial_call=True,
 )
 def refresh_data(n_clicks):
     global df, pricing
     df, pricing = _load_and_prepare()
-    return n_clicks
+    min_date = df["finished_at"].min() if not df.empty else None
+    max_date = df["finished_at"].max() if not df.empty else None
+    return n_clicks, min_date, max_date, min_date, max_date
 
 
 # ---------------------------------------------------------------------------
@@ -242,16 +251,17 @@ def update_dashboard(start_date, end_date, _refresh):
     total_cache = int(dff["cache_read_input_tokens"].sum())
     total_cost = dff["cost_usd"].sum()
 
-    # --- 1. Token usage over time ---
+    # --- 1. Token usage over time (replace 0 with NaN so Plotly skips them) ---
     fig_time = go.Figure()
     for col, name, color in [
         ("input_tokens", "Input", "#636EFA"),
         ("output_tokens", "Output", "#EF553B"),
         ("cache_read_input_tokens", "Cache Read", "#00CC96"),
     ]:
+        y_vals = dff[col].replace(0, np.nan)
         fig_time.add_trace(go.Scatter(
-            x=dff["finished_at"], y=dff[col], mode="lines", name=name,
-            line=dict(color=color, width=1.5),
+            x=dff["finished_at"], y=y_vals, mode="lines", name=name,
+            line=dict(color=color, width=1.5), connectgaps=False,
         ))
     fig_time.update_layout(
         template=PLOT_TEMPLATE, title="Token Usage Over Time",
@@ -266,11 +276,16 @@ def update_dashboard(start_date, end_date, _refresh):
         "tool_result_tokens", "current_message_tokens", "assistant_response_tokens",
     ]
     breakdown_sums = {c.replace("_tokens", "").replace("_", " ").title(): int(dff[c].sum()) for c in breakdown_cols}
+    # Filter out zero-total breakdown categories
+    filtered_labels = [k for k, v in breakdown_sums.items() if v > 0]
+    filtered_values = [breakdown_sums[k] for k in filtered_labels]
+    filtered_colors = [px.colors.qualitative.Plotly[i] for i, c in enumerate(breakdown_cols)
+                       if breakdown_sums[c.replace("_tokens", "").replace("_", " ").title()] > 0]
     fig_breakdown = go.Figure(go.Bar(
-        x=list(breakdown_sums.values()),
-        y=list(breakdown_sums.keys()),
+        x=filtered_values,
+        y=filtered_labels,
         orientation="h",
-        marker_color=px.colors.qualitative.Plotly[:len(breakdown_cols)],
+        marker_color=filtered_colors if filtered_colors else px.colors.qualitative.Plotly[:1],
     ))
     fig_breakdown.update_layout(
         template=PLOT_TEMPLATE, title="Token Breakdown by Type",
@@ -284,9 +299,10 @@ def update_dashboard(start_date, end_date, _refresh):
         dff.groupby("session_id")[["input_tokens", "output_tokens", "cost_usd"]]
         .sum()
         .assign(total=lambda x: x["input_tokens"] + x["output_tokens"])
-        .nlargest(20, "total")
-        .sort_values("total")
     )
+    # Filter out sessions with zero total tokens
+    session_totals = session_totals[session_totals["total"] > 0]
+    session_totals = session_totals.nlargest(20, "total").sort_values("total")
     fig_session = go.Figure()
     fig_session.add_trace(go.Bar(
         y=session_totals.index.astype(str).str[:12],
@@ -321,6 +337,8 @@ def update_dashboard(start_date, end_date, _refresh):
         .assign(total=lambda x: x["input_tokens"] + x["output_tokens"])
         .sort_values("total", ascending=False)
     )
+    # Filter out models with zero total tokens
+    model_totals = model_totals[model_totals["total"] > 0]
     fig_model = go.Figure(go.Pie(
         labels=model_totals.index,
         values=model_totals["total"],
@@ -354,6 +372,8 @@ def update_dashboard(start_date, end_date, _refresh):
 
     # --- 6. Cost by model (bar) ---
     model_costs = dff.groupby("model_id")["cost_usd"].sum().sort_values(ascending=True)
+    # Filter out models with zero cost
+    model_costs = model_costs[model_costs > 0]
     fig_cost_model = go.Figure(go.Bar(
         y=model_costs.index,
         x=model_costs.values,
@@ -369,15 +389,19 @@ def update_dashboard(start_date, end_date, _refresh):
         margin=dict(l=140, r=20, t=40, b=40),
     )
 
-    # --- 7. Cache efficiency ---
+    # --- 7. Cache efficiency (replace 0 with NaN) ---
     fig_cache = go.Figure()
+    cache_read_vals = dff["cache_read_input_tokens"].replace(0, np.nan)
+    cache_create_vals = dff["cache_creation_input_tokens"].replace(0, np.nan)
     fig_cache.add_trace(go.Scatter(
-        x=dff["finished_at"], y=dff["cache_read_input_tokens"],
+        x=dff["finished_at"], y=cache_read_vals,
         mode="lines", name="Cache Read", line=dict(color="#00CC96", width=1.5),
+        connectgaps=False,
     ))
     fig_cache.add_trace(go.Scatter(
-        x=dff["finished_at"], y=dff["cache_creation_input_tokens"],
+        x=dff["finished_at"], y=cache_create_vals,
         mode="lines", name="Cache Creation", line=dict(color="#FFA15A", width=1.5),
+        connectgaps=False,
     ))
     fig_cache.update_layout(
         template=PLOT_TEMPLATE, title="Cache Efficiency Over Time",
