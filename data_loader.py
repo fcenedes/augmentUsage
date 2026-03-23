@@ -161,12 +161,10 @@ def compute_cost(row: pd.Series, pricing: dict[str, dict[str, float]]) -> float:
     p = pricing[llm_id]
     input_price = p.get("input", 0)
     output_price = p.get("output", 0)
-    cached_price = p.get("input_cached", input_price)
 
     cost = (
         (row.get("input_tokens", 0) or 0) * input_price / 1_000_000
         + (row.get("output_tokens", 0) or 0) * output_price / 1_000_000
-        + (row.get("cache_read_input_tokens", 0) or 0) * cached_price / 1_000_000
         + (row.get("cache_creation_input_tokens", 0) or 0) * input_price / 1_000_000
     )
     return cost
