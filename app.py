@@ -51,6 +51,104 @@ app = Dash(
 USERNAME = get_username()
 
 # ---------------------------------------------------------------------------
+# Custom index string: set html/body background to prevent white flash
+# ---------------------------------------------------------------------------
+app.index_string = '''<!DOCTYPE html>
+<html>
+    <head>
+        {%metas%}
+        <title>{%title%}</title>
+        {%favicon%}
+        {%css%}
+        <style>
+            html, body {
+                margin: 0;
+                padding: 0;
+                background-color: #0A1A23;
+                font-family: 'Space Grotesk', sans-serif;
+                -webkit-font-smoothing: antialiased;
+            }
+            /* Date picker dark theme overrides */
+            .DateInput_input {
+                background-color: #122A35 !important;
+                color: #F0F4F5 !important;
+                font-family: 'Space Grotesk', sans-serif !important;
+                border-bottom: 2px solid #2D4754 !important;
+            }
+            .DateInput_input__focused {
+                border-bottom: 2px solid #FF4438 !important;
+            }
+            .DateRangePickerInput {
+                background-color: #122A35 !important;
+                border: 1px solid #2D4754 !important;
+                border-radius: 5px !important;
+            }
+            .DateInput {
+                background-color: transparent !important;
+            }
+            .DateRangePickerInput_arrow_svg {
+                fill: #C8D1D5 !important;
+            }
+            /* Calendar popup */
+            .DayPicker {
+                background-color: #122A35 !important;
+            }
+            .CalendarMonth {
+                background-color: #122A35 !important;
+            }
+            .CalendarMonth_caption {
+                color: #F0F4F5 !important;
+            }
+            .CalendarDay__default {
+                background-color: #122A35 !important;
+                color: #F0F4F5 !important;
+                border: 1px solid #2D4754 !important;
+            }
+            .CalendarDay__selected {
+                background-color: #FF4438 !important;
+                color: #fff !important;
+            }
+            .CalendarDay__hovered_span, .CalendarDay__selected_span {
+                background-color: #1C3A47 !important;
+                color: #F0F4F5 !important;
+            }
+            .DayPickerNavigation_button__default {
+                background-color: #1C3A47 !important;
+                border: 1px solid #2D4754 !important;
+            }
+            .DayPickerNavigation_svg__horizontal {
+                fill: #F0F4F5 !important;
+            }
+            /* Dropdown styling */
+            .Select-control {
+                background-color: #122A35 !important;
+                border-color: #2D4754 !important;
+                color: #F0F4F5 !important;
+            }
+            .Select-menu-outer {
+                background-color: #122A35 !important;
+                border-color: #2D4754 !important;
+            }
+            .VirtualizedSelectOption {
+                background-color: #122A35 !important;
+                color: #F0F4F5 !important;
+            }
+            .VirtualizedSelectFocusedOption {
+                background-color: #1C3A47 !important;
+            }
+        </style>
+    </head>
+    <body>
+        {%app_entry%}
+        <footer>
+            {%config%}
+            {%scripts%}
+            {%renderer%}
+        </footer>
+    </body>
+</html>'''
+
+# ---------------------------------------------------------------------------
 # Redis Brand Dark Mode Palette
 # ---------------------------------------------------------------------------
 REDIS_BG = "#0A1A23"
@@ -199,7 +297,8 @@ app.layout = html.Div(
         "padding": "24px",
     },
     children=[
-        # Hidden stores
+        # Hidden stores & dummy elements
+        html.Div(id="body-bg-dummy", style={"display": "none"}),
         dcc.Store(id="refresh-trigger", data=0),
         dcc.Store(id="team-data-store", storage_type="session", data=[]),
         dcc.Store(id="theme-store", storage_type="local", data="dark"),
@@ -217,7 +316,7 @@ app.layout = html.Div(
                     style={"textAlign": "center", "marginBottom": "0", "color": REDIS_TEXT, "fontFamily": REDIS_FONT},
                 ),
                 html.Button(
-                    "🌙", id="theme-toggle-btn", n_clicks=0,
+                    "☀️", id="theme-toggle-btn", n_clicks=0,
                     style={
                         "backgroundColor": "transparent", "border": f"1px solid {REDIS_BORDER}",
                         "borderRadius": "5px", "padding": "6px 12px", "cursor": "pointer",
@@ -557,6 +656,23 @@ def apply_theme(theme):
     }
     header_style = {"textAlign": "center", "marginBottom": "0", "color": t["text"], "fontFamily": REDIS_FONT}
     return main_style, tab_style, controls_style, header_style
+
+
+# ---------------------------------------------------------------------------
+# Clientside callback: update body/html background on theme change
+# ---------------------------------------------------------------------------
+app.clientside_callback(
+    """
+    function(theme) {
+        var bg = theme === 'light' ? '#FFFFFF' : '#0A1A23';
+        document.body.style.backgroundColor = bg;
+        document.documentElement.style.backgroundColor = bg;
+        return '';
+    }
+    """,
+    Output("body-bg-dummy", "children"),
+    Input("theme-store", "data"),
+)
 
 
 # ---------------------------------------------------------------------------
