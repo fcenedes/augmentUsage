@@ -3,11 +3,12 @@ import os
 from dash import Dash, html, dcc, Input, Output, State, callback_context, no_update, dash_table
 import plotly.express as px
 import plotly.graph_objects as go
+import plotly.io as pio
 import numpy as np
 import pandas as pd
 import json
 import base64
-from datetime import datetime
+from datetime import datetime, timedelta
 from data_loader import load_sessions, fetch_pricing, compute_cost, MODEL_ID_MAP, get_username
 
 # ---------------------------------------------------------------------------
@@ -38,46 +39,86 @@ df, pricing = _load_and_prepare()
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
-app = Dash(__name__, suppress_callback_exceptions=True)
+app = Dash(
+    __name__,
+    external_stylesheets=[
+        "https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@300;400;500;600;700&family=Space+Mono:wght@400;700&display=swap"
+    ],
+    suppress_callback_exceptions=True,
+)
 
 USERNAME = get_username()
 
+# ---------------------------------------------------------------------------
+# Redis Brand Dark Mode Palette
+# ---------------------------------------------------------------------------
+REDIS_BG = "#0A1A23"
+REDIS_CARD_BG = "#122A35"
+REDIS_SECTION_BG = "#1C3A47"
+REDIS_TEXT = "#F0F4F5"
+REDIS_TEXT_SECONDARY = "#C8D1D5"
+REDIS_TEXT_MUTED = "#5A6A72"
+REDIS_RED = "#FF4438"
+REDIS_RED_HOVER = "#FF7566"
+REDIS_BORDER = "#2D4754"
+REDIS_BORDER_LIGHT = "#3D5764"
+REDIS_COLORWAY = ["#FF4438", "#8AB4C7", "#FF7566", "#C8D1D5", "#5A6A72", "#2D4754"]
+REDIS_FONT = "'Space Grotesk', sans-serif"
+REDIS_MONO = "'Space Mono', monospace"
+
+# Custom Plotly template
+REDIS_DARK_TEMPLATE = go.layout.Template(
+    layout=go.Layout(
+        paper_bgcolor=REDIS_CARD_BG,
+        plot_bgcolor=REDIS_CARD_BG,
+        font=dict(family=REDIS_FONT, color=REDIS_TEXT),
+        colorway=REDIS_COLORWAY,
+        xaxis=dict(gridcolor=REDIS_SECTION_BG, zerolinecolor=REDIS_SECTION_BG),
+        yaxis=dict(gridcolor=REDIS_SECTION_BG, zerolinecolor=REDIS_SECTION_BG),
+    )
+)
+pio.templates["redis_dark"] = REDIS_DARK_TEMPLATE
+PLOT_TEMPLATE = "redis_dark"
+
 CARD_STYLE = {
-    "backgroundColor": "#1e1e2f",
-    "borderRadius": "10px",
+    "backgroundColor": REDIS_CARD_BG,
+    "borderRadius": "5px",
     "padding": "20px",
     "textAlign": "center",
     "flex": "1",
     "minWidth": "160px",
+    "border": f"1px solid {REDIS_BORDER}",
 }
-CARD_TITLE = {"color": "#aaa", "fontSize": "0.85rem", "marginBottom": "6px"}
-CARD_VALUE = {"color": "#fff", "fontSize": "1.6rem", "fontWeight": "bold"}
-PLOT_TEMPLATE = "plotly_dark"
+CARD_TITLE = {"color": REDIS_TEXT_SECONDARY, "fontSize": "0.85rem", "marginBottom": "8px", "fontFamily": REDIS_FONT}
+CARD_VALUE = {"color": REDIS_RED, "fontSize": "1.6rem", "fontWeight": "bold", "fontFamily": REDIS_MONO}
 
 BTN_STYLE = {
-    "backgroundColor": "#3a3a5c",
+    "backgroundColor": REDIS_RED,
     "color": "#fff",
-    "border": "1px solid #555",
-    "borderRadius": "6px",
+    "border": "none",
+    "borderRadius": "5px",
     "padding": "8px 16px",
     "cursor": "pointer",
     "fontSize": "0.9rem",
+    "fontFamily": REDIS_FONT,
+    "transition": "all 0.2s ease-in-out",
 }
 
 TAB_STYLE = {
-    "backgroundColor": "#1e1e2f",
-    "color": "#aaa",
-    "border": "1px solid #333",
-    "borderBottom": "1px solid #333",
+    "backgroundColor": REDIS_CARD_BG,
+    "color": REDIS_TEXT_SECONDARY,
+    "border": f"1px solid {REDIS_BORDER}",
+    "borderBottom": f"1px solid {REDIS_BORDER}",
     "padding": "10px 20px",
-    "borderRadius": "6px 6px 0 0",
+    "borderRadius": "5px 5px 0 0",
+    "fontFamily": REDIS_FONT,
 }
 
 TAB_SELECTED_STYLE = {
     **TAB_STYLE,
-    "backgroundColor": "#2a2a4a",
-    "color": "#fff",
-    "borderBottom": "1px solid #2a2a4a",
+    "backgroundColor": REDIS_SECTION_BG,
+    "color": REDIS_TEXT,
+    "borderBottom": f"2px solid {REDIS_RED}",
 }
 
 
@@ -105,9 +146,9 @@ def make_card(title: str, value_id: str):
 # ---------------------------------------------------------------------------
 app.layout = html.Div(
     style={
-        "backgroundColor": "#121220",
-        "color": "#e0e0e0",
-        "fontFamily": "'Segoe UI', Roboto, sans-serif",
+        "backgroundColor": REDIS_BG,
+        "color": REDIS_TEXT,
+        "fontFamily": REDIS_FONT,
         "minHeight": "100vh",
         "padding": "24px",
     },
@@ -120,7 +161,7 @@ app.layout = html.Div(
         # Header
         html.H1(
             f"Augment Session Dashboard — {USERNAME}",
-            style={"textAlign": "center", "marginBottom": "4px", "color": "#fff"},
+            style={"textAlign": "center", "marginBottom": "4px", "color": REDIS_TEXT, "fontFamily": REDIS_FONT},
         ),
 
         # Controls bar: date range + buttons
@@ -128,8 +169,8 @@ app.layout = html.Div(
             style={
                 "display": "flex", "justifyContent": "center", "alignItems": "center",
                 "marginBottom": "20px", "gap": "12px", "flexWrap": "wrap",
-                "backgroundColor": "#1a1a30", "borderRadius": "10px",
-                "padding": "14px 20px", "border": "1px solid #2a2a4a",
+                "backgroundColor": REDIS_CARD_BG, "borderRadius": "5px",
+                "padding": "16px 24px", "border": f"1px solid {REDIS_BORDER}",
             },
             children=[
                 html.Span("📅", style={"fontSize": "1.2rem"}),
@@ -139,9 +180,9 @@ app.layout = html.Div(
                     max_date_allowed=df["finished_at"].max() if not df.empty else None,
                     start_date=df["finished_at"].min() if not df.empty else None,
                     end_date=df["finished_at"].max() if not df.empty else None,
-                    style={"backgroundColor": "#1e1e2f"},
+                    style={"backgroundColor": REDIS_CARD_BG},
                 ),
-                html.Div(style={"width": "1px", "height": "28px", "backgroundColor": "#444", "margin": "0 4px"}),
+                html.Div(style={"width": "1px", "height": "28px", "backgroundColor": REDIS_BORDER_LIGHT, "margin": "0 4px"}),
                 html.Button("🔄 Refresh", id="refresh-btn", n_clicks=0, style=BTN_STYLE),
                 html.Button("📤 Export My Data", id="export-btn", n_clicks=0, style=BTN_STYLE),
                 dcc.Upload(
@@ -154,7 +195,7 @@ app.layout = html.Div(
         ),
 
         # Import status message
-        html.Div(id="import-status", style={"textAlign": "center", "color": "#00CC96", "marginBottom": "10px"}),
+        html.Div(id="import-status", style={"textAlign": "center", "color": REDIS_RED, "marginBottom": "10px"}),
 
         # Tabs
         dcc.Tabs(
@@ -168,7 +209,7 @@ app.layout = html.Div(
         ),
 
         # Tab content container
-        html.Div(id="tab-content", style={"backgroundColor": "#121220", "paddingTop": "20px"}),
+        html.Div(id="tab-content", style={"backgroundColor": REDIS_BG, "paddingTop": "20px"}),
     ],
 )
 
@@ -190,7 +231,7 @@ def _my_usage_layout():
     """Return the 'My Usage' tab content (all existing charts)."""
     return html.Div([
         # Subtitle
-        html.P(id="subtitle", style={"textAlign": "center", "color": "#888", "marginBottom": "20px"}),
+        html.P(id="subtitle", style={"textAlign": "center", "color": REDIS_TEXT_MUTED, "marginBottom": "20px"}),
         # Summary cards
         html.Div(
             id="summary-cards",
@@ -235,6 +276,61 @@ def _my_usage_layout():
                 html.Div(dcc.Graph(id="cache-efficiency"), style={"flex": "1", "maxWidth": "900px"}),
             ],
         ),
+
+        # ---- NEW ANALYTICS CHARTS ----
+        html.Hr(style={"borderColor": REDIS_BORDER, "margin": "32px 0"}),
+        html.H2("Advanced Analytics", style={"textAlign": "center", "color": REDIS_TEXT, "marginBottom": "24px", "fontFamily": REDIS_FONT}),
+
+        # Chart 5: Daily/Weekly Summary
+        html.Div(style={"marginBottom": "24px", "backgroundColor": REDIS_CARD_BG, "borderRadius": "5px", "padding": "16px", "border": f"1px solid {REDIS_BORDER}"}, children=[
+            html.H3("Daily / Weekly Summary", style={"color": REDIS_TEXT, "marginBottom": "8px", "fontFamily": REDIS_FONT}),
+            dcc.RadioItems(
+                id="summary-toggle",
+                options=[{"label": " Daily", "value": "daily"}, {"label": " Weekly", "value": "weekly"}],
+                value="daily",
+                inline=True,
+                style={"marginBottom": "8px", "color": REDIS_TEXT_SECONDARY, "fontFamily": REDIS_FONT},
+                inputStyle={"marginRight": "4px"},
+                labelStyle={"marginRight": "16px"},
+            ),
+            dcc.Graph(id="daily-weekly-summary"),
+        ]),
+
+        # Chart 6: Hourly Activity Heatmap
+        html.Div(style={"marginBottom": "24px", "backgroundColor": REDIS_CARD_BG, "borderRadius": "5px", "padding": "16px", "border": f"1px solid {REDIS_BORDER}"}, children=[
+            html.H3("Hourly Activity Heatmap", style={"color": REDIS_TEXT, "marginBottom": "8px", "fontFamily": REDIS_FONT}),
+            dcc.Graph(id="hourly-heatmap"),
+        ]),
+
+        # Charts row: Context Window + Token Efficiency
+        html.Div(
+            style={"display": "flex", "gap": "16px", "flexWrap": "wrap", "marginBottom": "24px"},
+            children=[
+                html.Div(style={"flex": "1", "minWidth": "400px", "backgroundColor": REDIS_CARD_BG, "borderRadius": "5px", "padding": "16px", "border": f"1px solid {REDIS_BORDER}"}, children=[
+                    html.H3("Context Window Utilization", style={"color": REDIS_TEXT, "marginBottom": "8px", "fontFamily": REDIS_FONT}),
+                    dcc.Graph(id="context-window"),
+                ]),
+                html.Div(style={"flex": "1", "minWidth": "400px", "backgroundColor": REDIS_CARD_BG, "borderRadius": "5px", "padding": "16px", "border": f"1px solid {REDIS_BORDER}"}, children=[
+                    html.H3("Token Efficiency Ratio", style={"color": REDIS_TEXT, "marginBottom": "8px", "fontFamily": REDIS_FONT}),
+                    dcc.Graph(id="token-efficiency"),
+                ]),
+            ],
+        ),
+
+        # Charts row: Burn Rate + Session Duration
+        html.Div(
+            style={"display": "flex", "gap": "16px", "flexWrap": "wrap", "marginBottom": "24px"},
+            children=[
+                html.Div(style={"flex": "1", "minWidth": "400px", "backgroundColor": REDIS_CARD_BG, "borderRadius": "5px", "padding": "16px", "border": f"1px solid {REDIS_BORDER}"}, children=[
+                    html.H3("Daily Burn Rate + Projection", style={"color": REDIS_TEXT, "marginBottom": "8px", "fontFamily": REDIS_FONT}),
+                    dcc.Graph(id="burn-rate"),
+                ]),
+                html.Div(style={"flex": "1", "minWidth": "400px", "backgroundColor": REDIS_CARD_BG, "borderRadius": "5px", "padding": "16px", "border": f"1px solid {REDIS_BORDER}"}, children=[
+                    html.H3("Session Duration Distribution", style={"color": REDIS_TEXT, "marginBottom": "8px", "fontFamily": REDIS_FONT}),
+                    dcc.Graph(id="session-duration"),
+                ]),
+            ],
+        ),
     ])
 
 
@@ -275,16 +371,17 @@ def _team_tab_layout():
                             {"name": "Cost (USD)", "id": "cost", "type": "numeric", "format": {"specifier": "$.4f"}},
                         ],
                         style_header={
-                            "backgroundColor": "#2a2a4a", "color": "#fff",
-                            "fontWeight": "bold", "border": "1px solid #444",
+                            "backgroundColor": REDIS_SECTION_BG, "color": REDIS_TEXT,
+                            "fontWeight": "bold", "border": f"1px solid {REDIS_BORDER}",
+                            "fontFamily": REDIS_FONT,
                         },
                         style_cell={
-                            "backgroundColor": "#1e1e2f", "color": "#e0e0e0",
-                            "border": "1px solid #333", "textAlign": "center",
-                            "padding": "10px",
+                            "backgroundColor": REDIS_CARD_BG, "color": REDIS_TEXT,
+                            "border": f"1px solid {REDIS_BORDER}", "textAlign": "center",
+                            "padding": "10px", "fontFamily": REDIS_FONT,
                         },
                         style_data_conditional=[
-                            {"if": {"row_index": "odd"}, "backgroundColor": "#252540"},
+                            {"if": {"row_index": "odd"}, "backgroundColor": REDIS_SECTION_BG},
                         ],
                         page_size=20,
                     ),
@@ -357,6 +454,11 @@ def refresh_data(n_clicks):
         Output("cost-time", "figure"),
         Output("cost-model", "figure"),
         Output("cache-efficiency", "figure"),
+        Output("hourly-heatmap", "figure"),
+        Output("context-window", "figure"),
+        Output("token-efficiency", "figure"),
+        Output("burn-rate", "figure"),
+        Output("session-duration", "figure"),
     ],
     [
         Input("date-range", "start_date"),
@@ -397,9 +499,9 @@ def update_dashboard(start_date, end_date, _refresh):
     # --- 1. Token usage over time (replace 0 with NaN so Plotly skips them) ---
     fig_time = go.Figure()
     for col, name, color in [
-        ("input_tokens", "Input", "#636EFA"),
-        ("output_tokens", "Output", "#EF553B"),
-        ("cache_read_input_tokens", "Cache Read", "#00CC96"),
+        ("input_tokens", "Input", REDIS_RED),
+        ("output_tokens", "Output", "#8AB4C7"),
+        ("cache_read_input_tokens", "Cache Read", REDIS_RED_HOVER),
     ]:
         y_vals = dff_plot[col].replace(0, np.nan)
         fig_time.add_trace(go.Scatter(
@@ -409,7 +511,6 @@ def update_dashboard(start_date, end_date, _refresh):
     fig_time.update_layout(
         template=PLOT_TEMPLATE, title="Token Usage Over Time",
         xaxis_title="Time", yaxis_title="Tokens",
-        paper_bgcolor="#1e1e2f", plot_bgcolor="#1e1e2f",
         margin=dict(l=50, r=20, t=40, b=40), legend=dict(orientation="h", y=-0.15),
     )
 
@@ -422,18 +523,17 @@ def update_dashboard(start_date, end_date, _refresh):
     # Filter out zero-total breakdown categories
     filtered_labels = [k for k, v in breakdown_sums.items() if v > 0]
     filtered_values = [breakdown_sums[k] for k in filtered_labels]
-    filtered_colors = [px.colors.qualitative.Plotly[i] for i, c in enumerate(breakdown_cols)
+    filtered_colors = [REDIS_COLORWAY[i % len(REDIS_COLORWAY)] for i, c in enumerate(breakdown_cols)
                        if breakdown_sums[c.replace("_tokens", "").replace("_", " ").title()] > 0]
     fig_breakdown = go.Figure(go.Bar(
         x=filtered_values,
         y=filtered_labels,
         orientation="h",
-        marker_color=filtered_colors if filtered_colors else px.colors.qualitative.Plotly[:1],
+        marker_color=filtered_colors if filtered_colors else [REDIS_RED],
     ))
     fig_breakdown.update_layout(
         template=PLOT_TEMPLATE, title="Token Breakdown by Type",
         xaxis_title="Total Tokens", yaxis_title="",
-        paper_bgcolor="#1e1e2f", plot_bgcolor="#1e1e2f",
         margin=dict(l=140, r=20, t=40, b=40),
     )
 
@@ -450,18 +550,17 @@ def update_dashboard(start_date, end_date, _refresh):
     fig_session.add_trace(go.Bar(
         y=session_totals.index.astype(str).str[:12],
         x=session_totals["input_tokens"], name="Input",
-        orientation="h", marker_color="#636EFA",
+        orientation="h", marker_color=REDIS_RED,
     ))
     fig_session.add_trace(go.Bar(
         y=session_totals.index.astype(str).str[:12],
         x=session_totals["output_tokens"], name="Output",
-        orientation="h", marker_color="#EF553B",
+        orientation="h", marker_color="#8AB4C7",
     ))
     # Add cost as text annotation
     fig_session.update_layout(
         template=PLOT_TEMPLATE, title="Top 20 Sessions by Total Tokens",
         barmode="stack", xaxis_title="Tokens", yaxis_title="Session",
-        paper_bgcolor="#1e1e2f", plot_bgcolor="#1e1e2f",
         margin=dict(l=110, r=80, t=40, b=40), legend=dict(orientation="h", y=-0.15),
     )
     # Add cost annotations on the right side of bars
@@ -470,7 +569,7 @@ def update_dashboard(start_date, end_date, _refresh):
             x=row["total"], y=str(sid)[:12],
             text=f" {_fmt_cost(row['cost_usd'])}",
             showarrow=False, xanchor="left",
-            font=dict(color="#00CC96", size=10),
+            font=dict(color=REDIS_RED_HOVER, size=10),
         )
 
     # --- 4. Model usage (donut) ---
@@ -487,11 +586,10 @@ def update_dashboard(start_date, end_date, _refresh):
         values=model_totals["total"],
         hole=0.45,
         textinfo="label+percent",
-        marker=dict(colors=px.colors.qualitative.Plotly),
+        marker=dict(colors=REDIS_COLORWAY),
     ))
     fig_model.update_layout(
         template=PLOT_TEMPLATE, title="Token Consumption by Model",
-        paper_bgcolor="#1e1e2f", plot_bgcolor="#1e1e2f",
         margin=dict(l=20, r=20, t=40, b=40),
     )
 
@@ -503,13 +601,12 @@ def update_dashboard(start_date, end_date, _refresh):
         fig_cost_time.add_trace(go.Scatter(
             x=dff_sorted["finished_at"], y=cumulative_cost,
             mode="lines", name="Cumulative Cost",
-            line=dict(color="#AB63FA", width=2),
-            fill="tozeroy", fillcolor="rgba(171,99,250,0.15)",
+            line=dict(color=REDIS_RED, width=2),
+            fill="tozeroy", fillcolor="rgba(255,68,56,0.15)",
         ))
     fig_cost_time.update_layout(
         template=PLOT_TEMPLATE, title="Cumulative Estimated Cost Over Time",
         xaxis_title="Time", yaxis_title="Cost (USD)",
-        paper_bgcolor="#1e1e2f", plot_bgcolor="#1e1e2f",
         margin=dict(l=60, r=20, t=40, b=40),
     )
 
@@ -521,14 +618,13 @@ def update_dashboard(start_date, end_date, _refresh):
         y=model_costs.index,
         x=model_costs.values,
         orientation="h",
-        marker_color="#AB63FA",
+        marker_color=REDIS_RED,
         text=[_fmt_cost(v) for v in model_costs.values],
         textposition="auto",
     ))
     fig_cost_model.update_layout(
         template=PLOT_TEMPLATE, title="Estimated Cost by Model",
         xaxis_title="Cost (USD)", yaxis_title="",
-        paper_bgcolor="#1e1e2f", plot_bgcolor="#1e1e2f",
         margin=dict(l=140, r=20, t=40, b=40),
     )
 
@@ -538,19 +634,136 @@ def update_dashboard(start_date, end_date, _refresh):
     cache_create_vals = dff_plot["cache_creation_input_tokens"].replace(0, np.nan)
     fig_cache.add_trace(go.Scatter(
         x=dff_plot["finished_at"], y=cache_read_vals,
-        mode="lines", name="Cache Read", line=dict(color="#00CC96", width=1.5),
+        mode="lines", name="Cache Read", line=dict(color="#8AB4C7", width=1.5),
         connectgaps=False,
     ))
     fig_cache.add_trace(go.Scatter(
         x=dff_plot["finished_at"], y=cache_create_vals,
-        mode="lines", name="Cache Creation", line=dict(color="#FFA15A", width=1.5),
+        mode="lines", name="Cache Creation", line=dict(color=REDIS_RED_HOVER, width=1.5),
         connectgaps=False,
     ))
     fig_cache.update_layout(
         template=PLOT_TEMPLATE, title="Cache Efficiency Over Time",
         xaxis_title="Time", yaxis_title="Tokens",
-        paper_bgcolor="#1e1e2f", plot_bgcolor="#1e1e2f",
         margin=dict(l=50, r=20, t=40, b=40), legend=dict(orientation="h", y=-0.15),
+    )
+
+    # --- 8. Hourly Activity Heatmap ---
+    fig_heatmap = go.Figure()
+    if not dff.empty:
+        dff_hm = dff.copy()
+        dff_hm["hour"] = dff_hm["finished_at"].dt.hour
+        dff_hm["dow"] = dff_hm["finished_at"].dt.dayofweek  # 0=Mon
+        dow_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+        hm_agg = dff_hm.groupby(["dow", "hour"])[["input_tokens", "output_tokens"]].sum()
+        hm_agg["total"] = hm_agg["input_tokens"] + hm_agg["output_tokens"]
+        hm_matrix = np.zeros((7, 24))
+        for (dow, hour), row in hm_agg.iterrows():
+            hm_matrix[dow, hour] = row["total"]
+        fig_heatmap = go.Figure(go.Heatmap(
+            z=hm_matrix, x=list(range(24)), y=dow_names,
+            colorscale=[[0, REDIS_BG], [0.5, REDIS_SECTION_BG], [1, REDIS_RED]],
+            hovertemplate="Hour: %{x}<br>Day: %{y}<br>Tokens: %{z:,.0f}<extra></extra>",
+        ))
+    fig_heatmap.update_layout(
+        template=PLOT_TEMPLATE, title="Hourly Activity Heatmap",
+        xaxis_title="Hour of Day", yaxis_title="",
+        margin=dict(l=60, r=20, t=40, b=40),
+    )
+
+    # --- 9. Context Window Utilization ---
+    fig_ctx = go.Figure()
+    if not dff.empty:
+        ctx_cols = ["input_tokens", "cache_read_input_tokens", "system_prompt_tokens",
+                    "tool_definitions_tokens", "chat_history_tokens"]
+        dff_ctx = dff[dff["max_context_tokens"] > 0].copy()
+        if not dff_ctx.empty:
+            dff_ctx["ctx_pct"] = dff_ctx[ctx_cols].sum(axis=1) / dff_ctx["max_context_tokens"] * 100
+            fig_ctx.add_trace(go.Histogram(
+                x=dff_ctx["ctx_pct"], nbinsx=50,
+                marker_color=REDIS_RED, opacity=0.8,
+                name="Exchanges",
+            ))
+            fig_ctx.add_vline(x=80, line_dash="dash", line_color=REDIS_RED_HOVER,
+                              annotation_text="80% warning", annotation_font_color=REDIS_RED_HOVER)
+    fig_ctx.update_layout(
+        template=PLOT_TEMPLATE, title="Context Window Utilization",
+        xaxis_title="% Context Used", yaxis_title="Count",
+        margin=dict(l=50, r=20, t=40, b=40),
+    )
+
+    # --- 10. Token Efficiency Ratio ---
+    fig_efficiency = go.Figure()
+    if not dff.empty:
+        sess_eff = dff.groupby(["session_id", "model_id"])[["input_tokens", "output_tokens"]].sum().reset_index()
+        sess_eff = sess_eff[(sess_eff["input_tokens"] > 0) & (sess_eff["output_tokens"] > 0)]
+        if not sess_eff.empty:
+            for model_id in sess_eff["model_id"].unique():
+                mdf = sess_eff[sess_eff["model_id"] == model_id]
+                fig_efficiency.add_trace(go.Scatter(
+                    x=mdf["input_tokens"], y=mdf["output_tokens"],
+                    mode="markers", name=model_id,
+                    marker=dict(size=6, opacity=0.7),
+                ))
+            # Add 1:1 reference line
+            max_val = max(sess_eff["input_tokens"].max(), sess_eff["output_tokens"].max())
+            fig_efficiency.add_trace(go.Scatter(
+                x=[0, max_val], y=[0, max_val],
+                mode="lines", name="1:1 ratio",
+                line=dict(color=REDIS_TEXT_MUTED, dash="dot", width=1),
+                showlegend=True,
+            ))
+    fig_efficiency.update_layout(
+        template=PLOT_TEMPLATE, title="Token Efficiency (Input vs Output per Session)",
+        xaxis_title="Total Input Tokens", yaxis_title="Total Output Tokens",
+        margin=dict(l=60, r=20, t=40, b=40), legend=dict(orientation="h", y=-0.15),
+    )
+
+    # --- 11. Daily Burn Rate + Projection ---
+    fig_burn = go.Figure()
+    if not dff.empty:
+        daily_cost = dff.set_index("finished_at").resample("D")["cost_usd"].sum().reset_index()
+        daily_cost.columns = ["date", "cost"]
+        daily_cost = daily_cost[daily_cost["cost"] > 0]
+        if not daily_cost.empty:
+            fig_burn.add_trace(go.Scatter(
+                x=daily_cost["date"], y=daily_cost["cost"],
+                mode="lines+markers", name="Daily Cost",
+                line=dict(color=REDIS_RED, width=2),
+                marker=dict(size=5),
+            ))
+            # Projection: 30 days from last date at average rate
+            avg_daily = daily_cost["cost"].mean()
+            last_date = daily_cost["date"].max()
+            proj_dates = pd.date_range(last_date, periods=31, freq="D")
+            proj_costs = [daily_cost["cost"].iloc[-1] if i == 0 else avg_daily for i in range(31)]
+            fig_burn.add_trace(go.Scatter(
+                x=proj_dates, y=proj_costs,
+                mode="lines", name=f"Projection (avg ${avg_daily:.2f}/day)",
+                line=dict(color=REDIS_RED_HOVER, dash="dash", width=2),
+            ))
+    fig_burn.update_layout(
+        template=PLOT_TEMPLATE, title="Daily Burn Rate + 30-Day Projection",
+        xaxis_title="Date", yaxis_title="Cost (USD)",
+        margin=dict(l=60, r=20, t=40, b=40), legend=dict(orientation="h", y=-0.15),
+    )
+
+    # --- 12. Session Duration Distribution ---
+    fig_duration = go.Figure()
+    if not dff.empty:
+        sess_times = dff.groupby("session_id")["finished_at"].agg(["min", "max"])
+        sess_times["duration_min"] = (sess_times["max"] - sess_times["min"]).dt.total_seconds() / 60
+        sess_times = sess_times[sess_times["duration_min"] > 0]
+        if not sess_times.empty:
+            fig_duration.add_trace(go.Histogram(
+                x=sess_times["duration_min"], nbinsx=40,
+                marker_color="#8AB4C7", opacity=0.8,
+                name="Sessions",
+            ))
+    fig_duration.update_layout(
+        template=PLOT_TEMPLATE, title="Session Duration Distribution",
+        xaxis_title="Duration (minutes)", yaxis_title="Count",
+        margin=dict(l=50, r=20, t=40, b=40),
     )
 
     return (
@@ -560,7 +773,61 @@ def update_dashboard(start_date, end_date, _refresh):
         _fmt_cost(total_cost),
         fig_time, fig_breakdown, fig_session, fig_model,
         fig_cost_time, fig_cost_model, fig_cache,
+        fig_heatmap, fig_ctx, fig_efficiency, fig_burn, fig_duration,
     )
+
+
+
+# ---------------------------------------------------------------------------
+# Callback: Daily/Weekly Summary (separate due to toggle)
+# ---------------------------------------------------------------------------
+@app.callback(
+    Output("daily-weekly-summary", "figure"),
+    [
+        Input("date-range", "start_date"),
+        Input("date-range", "end_date"),
+        Input("refresh-trigger", "data"),
+        Input("summary-toggle", "value"),
+    ],
+)
+def update_daily_weekly(start_date, end_date, _refresh, period):
+    dff = _filter(start_date, end_date)
+    fig = go.Figure()
+    freq = "D" if period == "daily" else "W"
+    label = "Daily" if period == "daily" else "Weekly"
+    if not dff.empty:
+        grouped = dff.set_index("finished_at").resample(freq).agg(
+            input_tokens=("input_tokens", "sum"),
+            output_tokens=("output_tokens", "sum"),
+            cost_usd=("cost_usd", "sum"),
+        ).reset_index()
+        grouped["total_tokens"] = grouped["input_tokens"] + grouped["output_tokens"]
+        grouped = grouped[grouped["total_tokens"] > 0]
+        if not grouped.empty:
+            fig.add_trace(go.Bar(
+                x=grouped["finished_at"], y=grouped["total_tokens"],
+                name=f"{label} Tokens", marker_color=REDIS_RED, opacity=0.8,
+                yaxis="y",
+            ))
+            fig.add_trace(go.Scatter(
+                x=grouped["finished_at"], y=grouped["cost_usd"],
+                name=f"{label} Cost", mode="lines+markers",
+                line=dict(color="#8AB4C7", width=2),
+                marker=dict(size=5), yaxis="y2",
+            ))
+            fig.update_layout(
+                yaxis2=dict(
+                    title="Cost (USD)", overlaying="y", side="right",
+                    gridcolor=REDIS_SECTION_BG, zerolinecolor=REDIS_SECTION_BG,
+                ),
+            )
+    fig.update_layout(
+        template=PLOT_TEMPLATE, title=f"{label} Token Usage & Cost",
+        xaxis_title="Date", yaxis_title="Total Tokens",
+        margin=dict(l=60, r=60, t=40, b=40), legend=dict(orientation="h", y=-0.15),
+        barmode="overlay",
+    )
+    return fig
 
 
 # ---------------------------------------------------------------------------
@@ -664,9 +931,9 @@ def update_team_tab(team_data, active_tab):
     if active_tab != "team-usage" or not team_data:
         empty_fig = go.Figure()
         empty_fig.update_layout(
-            template=PLOT_TEMPLATE, paper_bgcolor="#1e1e2f", plot_bgcolor="#1e1e2f",
+            template=PLOT_TEMPLATE,
             annotations=[dict(text="Import team data to see charts", showarrow=False,
-                              font=dict(color="#888", size=16), xref="paper", yref="paper", x=0.5, y=0.5)],
+                              font=dict(color=REDIS_TEXT_MUTED, size=16), xref="paper", yref="paper", x=0.5, y=0.5)],
         )
         return "0", "0", "0", "$0.00", empty_fig, empty_fig, empty_fig, []
 
@@ -698,14 +965,13 @@ def update_team_tab(team_data, active_tab):
     # Cost per member bar chart
     fig_cost = go.Figure(go.Bar(
         x=members_df["username"], y=members_df["cost"],
-        marker_color="#AB63FA",
+        marker_color=REDIS_RED,
         text=[_fmt_cost(v) for v in members_df["cost"]],
         textposition="auto",
     ))
     fig_cost.update_layout(
         template=PLOT_TEMPLATE, title="Cost per Team Member",
         xaxis_title="", yaxis_title="Cost (USD)",
-        paper_bgcolor="#1e1e2f", plot_bgcolor="#1e1e2f",
         margin=dict(l=60, r=20, t=40, b=40),
     )
 
@@ -713,16 +979,15 @@ def update_team_tab(team_data, active_tab):
     fig_tokens = go.Figure()
     fig_tokens.add_trace(go.Bar(
         x=members_df["username"], y=members_df["input_tokens"],
-        name="Input", marker_color="#636EFA",
+        name="Input", marker_color=REDIS_RED,
     ))
     fig_tokens.add_trace(go.Bar(
         x=members_df["username"], y=members_df["output_tokens"],
-        name="Output", marker_color="#EF553B",
+        name="Output", marker_color="#8AB4C7",
     ))
     fig_tokens.update_layout(
         template=PLOT_TEMPLATE, title="Tokens per Team Member",
         barmode="stack", xaxis_title="", yaxis_title="Tokens",
-        paper_bgcolor="#1e1e2f", plot_bgcolor="#1e1e2f",
         margin=dict(l=60, r=20, t=40, b=40), legend=dict(orientation="h", y=-0.15),
     )
 
@@ -732,11 +997,10 @@ def update_team_tab(team_data, active_tab):
     fig_model = go.Figure(go.Pie(
         labels=model_labels, values=model_values, hole=0.45,
         textinfo="label+percent",
-        marker=dict(colors=px.colors.qualitative.Plotly),
+        marker=dict(colors=REDIS_COLORWAY),
     ))
     fig_model.update_layout(
         template=PLOT_TEMPLATE, title="Model Usage Across Team",
-        paper_bgcolor="#1e1e2f", plot_bgcolor="#1e1e2f",
         margin=dict(l=20, r=20, t=40, b=40),
     )
 
