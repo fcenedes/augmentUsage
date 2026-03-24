@@ -1,11 +1,18 @@
-# Dependencies
-node_modules/
-.pnpm-store/
-
-# Build outputs
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
 dist/
 build/
-out/
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
 
 # IDE
 .idea/
@@ -24,4 +31,3 @@ Thumbs.db
 
 # Logs
 *.log
-npm-debug.log*
