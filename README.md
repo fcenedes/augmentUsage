@@ -52,8 +52,11 @@ A Python Dash dashboard that visualizes your Augment AI token consumption and es
 ### Context Window & Token Efficiency
 ![Context utilization histogram and efficiency scatter plot](screenshots/redis-heatmap-context.png)
 
-### Burn Rate & Session Duration
-![Daily burn rate projection and session duration distribution](screenshots/redis-efficiency-burnrate.png)
+### Burn Rate & Token Efficiency
+![Daily burn rate projection and token efficiency ratio](screenshots/redis-efficiency-burnrate.png)
+
+### Session Duration
+![Session duration distribution](screenshots/redis-session-duration.png)
 
 ### Cost Per Session Table
 ![Sortable cost breakdown table with conditional formatting](screenshots/redis-cost-table.png)
