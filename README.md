@@ -17,15 +17,19 @@ A Python Dash dashboard that visualizes your Augment AI token consumption and es
 ## Screenshots
 
 ### Dashboard Overview
+
 ![Dashboard overview with summary cards and controls](screenshots/dashboard-overview.png)
 
 ### Token Usage & Breakdown
+
 ![Token usage over time and breakdown by type](screenshots/dashboard-charts.png)
 
 ### Cost Analysis
+
 ![Cumulative cost over time and cost by model](screenshots/dashboard-costs.png)
 
 ### Team Usage Tab
+
 ![Team usage tab for aggregated team data](screenshots/dashboard-team.png)
 
 ## Quick Start
@@ -81,7 +85,7 @@ The dashboard reads Augment session files from `~/.augment/sessions/*.json`. Eac
 
 - **Session data contains your full conversation history** with Augment AI, including code snippets, file paths, and potentially secrets or credentials that appeared in your prompts
 - **The exported JSON files** contain per-session token summaries (no conversation content), but do include your username and session IDs
-- **The dashboard binds to `127.0.0.1` (localhost only) by default** — it is NOT accessible from other machines on your network
+- **The dashboard binds to **`127.0.0.1`** (localhost only) by default** — it is NOT accessible from other machines on your network
 - **In Docker mode**, the compose file sets `HOST=0.0.0.0` — if your machine's firewall allows it, the dashboard could be accessible on your local network. The session data volume is mounted read-only
 - **Do not deploy this to a public server** — there is no authentication, and the session data directory would be exposed
 - **Exported team data files** should be shared through secure channels (not public Slack channels, not email without encryption)
