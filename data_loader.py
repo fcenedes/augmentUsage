@@ -157,6 +157,50 @@ def get_username() -> str:
     return os.environ.get("AUGMENT_USERNAME") or Path.home().name
 
 
+def extract_tool_usage(sessions_dir: str | None = None) -> pd.DataFrame:
+    """Extract tool usage counts from session response_nodes.
+
+    Returns a DataFrame with columns: session_id, tool_name, count.
+    """
+    if sessions_dir is None:
+        sessions_dir = os.environ.get("AUGMENT_SESSIONS_DIR") or os.path.expanduser("~/.augment/sessions")
+
+    sessions_path = Path(sessions_dir)
+    if not sessions_path.is_dir():
+        return pd.DataFrame(columns=["session_id", "tool_name", "count"])
+
+    tool_rows: list[dict] = []
+    for filepath in sorted(sessions_path.glob("*.json")):
+        try:
+            with open(filepath, encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError):
+            continue
+
+        session_id = data.get("sessionId", filepath.stem)
+        tool_counts: dict[str, int] = {}
+
+        for chat_item in data.get("chatHistory") or []:
+            exchange = chat_item.get("exchange") or {}
+            for node in exchange.get("response_nodes") or []:
+                # Check various possible tool indicators
+                node_type = node.get("type", "")
+                tool_name = node.get("tool_name") or node.get("name") or ""
+
+                if node_type in ("tool_use", "tool_call", "tool_result"):
+                    name = tool_name or node_type
+                    tool_counts[name] = tool_counts.get(name, 0) + 1
+                elif tool_name and node_type != "text":
+                    tool_counts[tool_name] = tool_counts.get(tool_name, 0) + 1
+
+        for name, count in tool_counts.items():
+            tool_rows.append({"session_id": session_id, "tool_name": name, "count": count})
+
+    if not tool_rows:
+        return pd.DataFrame(columns=["session_id", "tool_name", "count"])
+    return pd.DataFrame(tool_rows)
+
+
 def compute_cost(row: pd.Series, pricing: dict[str, dict[str, float]]) -> float:
     """Compute estimated cost in USD for a single exchange row."""
     llm_id = MODEL_ID_MAP.get(row.get("model_id", ""), "")

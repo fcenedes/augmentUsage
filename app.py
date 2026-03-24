@@ -9,7 +9,7 @@ import pandas as pd
 import json
 import base64
 from datetime import datetime, timedelta
-from data_loader import load_sessions, fetch_pricing, compute_cost, MODEL_ID_MAP, get_username
+from data_loader import load_sessions, fetch_pricing, compute_cost, MODEL_ID_MAP, get_username, extract_tool_usage
 
 # ---------------------------------------------------------------------------
 # Data
@@ -22,19 +22,20 @@ TOKEN_COLS = [
 ]
 
 
-def _load_and_prepare() -> tuple[pd.DataFrame, dict]:
-    """Load sessions, clean numeric columns, compute costs, return (df, pricing)."""
+def _load_and_prepare() -> tuple[pd.DataFrame, dict, pd.DataFrame]:
+    """Load sessions, clean numeric columns, compute costs, return (df, pricing, tool_df)."""
     df = load_sessions()
     pricing = fetch_pricing()
+    tool_df = extract_tool_usage()
     for col in TOKEN_COLS:
         df[col] = pd.to_numeric(df[col], errors="coerce").fillna(0).astype(int)
     df = df.sort_values("finished_at").reset_index(drop=True)
     # Compute per-exchange cost
     df["cost_usd"] = df.apply(lambda r: compute_cost(r, pricing), axis=1)
-    return df, pricing
+    return df, pricing, tool_df
 
 
-df, pricing = _load_and_prepare()
+df, pricing, tool_df = _load_and_prepare()
 
 # ---------------------------------------------------------------------------
 # App
@@ -79,6 +80,50 @@ REDIS_DARK_TEMPLATE = go.layout.Template(
 )
 pio.templates["redis_dark"] = REDIS_DARK_TEMPLATE
 PLOT_TEMPLATE = "redis_dark"
+
+# ---------------------------------------------------------------------------
+# Redis Brand Light Mode Palette
+# ---------------------------------------------------------------------------
+LIGHT_BG = "#FFFFFF"
+LIGHT_CARD_BG = "#FFFFFF"
+LIGHT_SECTION_BG = "#F0F4F5"
+LIGHT_TEXT = "#091A23"
+LIGHT_TEXT_SECONDARY = "#163341"
+LIGHT_TEXT_MUTED = "#8A99A0"
+LIGHT_BORDER = "#163341"
+LIGHT_BORDER_LIGHT = "#2D4754"
+
+REDIS_LIGHT_TEMPLATE = go.layout.Template(
+    layout=go.Layout(
+        paper_bgcolor=LIGHT_CARD_BG,
+        plot_bgcolor=LIGHT_CARD_BG,
+        font=dict(family=REDIS_FONT, color=LIGHT_TEXT),
+        colorway=REDIS_COLORWAY,
+        xaxis=dict(gridcolor=LIGHT_SECTION_BG, zerolinecolor=LIGHT_SECTION_BG),
+        yaxis=dict(gridcolor=LIGHT_SECTION_BG, zerolinecolor=LIGHT_SECTION_BG),
+    )
+)
+pio.templates["redis_light"] = REDIS_LIGHT_TEMPLATE
+
+
+def _theme_vals(theme: str) -> dict:
+    """Return a dict of palette values for the given theme."""
+    if theme == "light":
+        return dict(
+            bg=LIGHT_BG, card_bg=LIGHT_CARD_BG, section_bg=LIGHT_SECTION_BG,
+            text=LIGHT_TEXT, text_secondary=LIGHT_TEXT_SECONDARY, text_muted=LIGHT_TEXT_MUTED,
+            red=REDIS_RED, red_hover=REDIS_RED_HOVER,
+            border=LIGHT_BORDER, border_light=LIGHT_BORDER_LIGHT,
+            template="redis_light",
+        )
+    return dict(
+        bg=REDIS_BG, card_bg=REDIS_CARD_BG, section_bg=REDIS_SECTION_BG,
+        text=REDIS_TEXT, text_secondary=REDIS_TEXT_SECONDARY, text_muted=REDIS_TEXT_MUTED,
+        red=REDIS_RED, red_hover=REDIS_RED_HOVER,
+        border=REDIS_BORDER, border_light=REDIS_BORDER_LIGHT,
+        template="redis_dark",
+    )
+
 
 CARD_STYLE = {
     "backgroundColor": REDIS_CARD_BG,
@@ -145,6 +190,7 @@ def make_card(title: str, value_id: str):
 # Layout
 # ---------------------------------------------------------------------------
 app.layout = html.Div(
+    id="main-container",
     style={
         "backgroundColor": REDIS_BG,
         "color": REDIS_TEXT,
@@ -156,16 +202,34 @@ app.layout = html.Div(
         # Hidden stores
         dcc.Store(id="refresh-trigger", data=0),
         dcc.Store(id="team-data-store", storage_type="session", data=[]),
+        dcc.Store(id="theme-store", storage_type="local", data="dark"),
         dcc.Download(id="download-export"),
+        # Auto-refresh interval (disabled by default)
+        dcc.Interval(id="auto-refresh-interval", interval=60_000, disabled=True),
 
         # Header
-        html.H1(
-            f"Augment Session Dashboard — {USERNAME}",
-            style={"textAlign": "center", "marginBottom": "4px", "color": REDIS_TEXT, "fontFamily": REDIS_FONT},
+        html.Div(
+            style={"display": "flex", "justifyContent": "center", "alignItems": "center", "gap": "16px", "marginBottom": "4px"},
+            children=[
+                html.H1(
+                    f"Augment Session Dashboard — {USERNAME}",
+                    id="header-title",
+                    style={"textAlign": "center", "marginBottom": "0", "color": REDIS_TEXT, "fontFamily": REDIS_FONT},
+                ),
+                html.Button(
+                    "🌙", id="theme-toggle-btn", n_clicks=0,
+                    style={
+                        "backgroundColor": "transparent", "border": f"1px solid {REDIS_BORDER}",
+                        "borderRadius": "5px", "padding": "6px 12px", "cursor": "pointer",
+                        "fontSize": "1.2rem", "color": REDIS_TEXT,
+                    },
+                ),
+            ],
         ),
 
-        # Controls bar: date range + buttons
+        # Controls bar: date range + buttons + auto-refresh
         html.Div(
+            id="controls-bar",
             style={
                 "display": "flex", "justifyContent": "center", "alignItems": "center",
                 "marginBottom": "20px", "gap": "12px", "flexWrap": "wrap",
@@ -184,6 +248,26 @@ app.layout = html.Div(
                 ),
                 html.Div(style={"width": "1px", "height": "28px", "backgroundColor": REDIS_BORDER_LIGHT, "margin": "0 4px"}),
                 html.Button("🔄 Refresh", id="refresh-btn", n_clicks=0, style=BTN_STYLE),
+                # Auto-refresh dropdown
+                html.Div(
+                    style={"display": "flex", "alignItems": "center", "gap": "4px"},
+                    children=[
+                        html.Span("⏱️", style={"fontSize": "1rem"}),
+                        dcc.Dropdown(
+                            id="auto-refresh-dropdown",
+                            options=[
+                                {"label": "Off", "value": "off"},
+                                {"label": "1 min", "value": "60"},
+                                {"label": "5 min", "value": "300"},
+                                {"label": "15 min", "value": "900"},
+                            ],
+                            value="off",
+                            clearable=False,
+                            style={"width": "100px", "backgroundColor": REDIS_CARD_BG, "color": REDIS_TEXT, "fontSize": "0.85rem"},
+                        ),
+                    ],
+                ),
+                html.Div(style={"width": "1px", "height": "28px", "backgroundColor": REDIS_BORDER_LIGHT, "margin": "0 4px"}),
                 html.Button("📤 Export My Data", id="export-btn", n_clicks=0, style=BTN_STYLE),
                 dcc.Upload(
                     id="import-upload",
@@ -253,12 +337,20 @@ def _my_usage_layout():
                 html.Div(dcc.Graph(id="token-breakdown"), style={"flex": "1", "minWidth": "400px"}),
             ],
         ),
-        # Charts row 2
+        # Charts row 2: session bar + model pie + model comparison
         html.Div(
             style={"display": "flex", "gap": "16px", "flexWrap": "wrap", "marginBottom": "24px"},
             children=[
                 html.Div(dcc.Graph(id="session-bar"), style={"flex": "1", "minWidth": "400px"}),
                 html.Div(dcc.Graph(id="model-pie"), style={"flex": "1", "minWidth": "400px"}),
+            ],
+        ),
+        # Model Comparison: cost per 1K output tokens
+        html.Div(
+            style={"display": "flex", "gap": "16px", "flexWrap": "wrap", "marginBottom": "24px"},
+            children=[
+                html.Div(dcc.Graph(id="model-comparison"), style={"flex": "1", "minWidth": "400px"}),
+                html.Div(dcc.Graph(id="tool-usage-chart"), style={"flex": "1", "minWidth": "400px"}),
             ],
         ),
         # Charts row 3 – Cost charts
@@ -331,6 +423,16 @@ def _my_usage_layout():
                 ]),
             ],
         ),
+
+        # ---- COST PER SESSION BREAKDOWN TABLE ----
+        html.Hr(style={"borderColor": REDIS_BORDER, "margin": "32px 0"}),
+        html.H2("Cost Per Session Breakdown", style={"textAlign": "center", "color": REDIS_TEXT, "marginBottom": "24px", "fontFamily": REDIS_FONT}),
+        html.Div(id="cost-session-table-container", style={"marginBottom": "24px"}),
+
+        # ---- SORTABLE DATA TABLE ----
+        html.Hr(style={"borderColor": REDIS_BORDER, "margin": "32px 0"}),
+        html.H2("Session Data Table", style={"textAlign": "center", "color": REDIS_TEXT, "marginBottom": "24px", "fontFamily": REDIS_FONT}),
+        html.Div(id="session-data-table-container", style={"marginBottom": "24px"}),
     ])
 
 
@@ -414,7 +516,64 @@ def _fmt_cost(v: float) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Callback: Refresh data
+# Callback: Theme toggle
+# ---------------------------------------------------------------------------
+@app.callback(
+    [Output("theme-store", "data"), Output("theme-toggle-btn", "children")],
+    Input("theme-toggle-btn", "n_clicks"),
+    State("theme-store", "data"),
+    prevent_initial_call=True,
+)
+def toggle_theme(n_clicks, current_theme):
+    new_theme = "light" if current_theme == "dark" else "dark"
+    icon = "☀️" if new_theme == "dark" else "🌙"
+    return new_theme, icon
+
+
+# ---------------------------------------------------------------------------
+# Callback: Apply theme to main container
+# ---------------------------------------------------------------------------
+@app.callback(
+    [
+        Output("main-container", "style"),
+        Output("tab-content", "style"),
+        Output("controls-bar", "style"),
+        Output("header-title", "style"),
+    ],
+    Input("theme-store", "data"),
+)
+def apply_theme(theme):
+    t = _theme_vals(theme)
+    main_style = {
+        "backgroundColor": t["bg"], "color": t["text"],
+        "fontFamily": REDIS_FONT, "minHeight": "100vh", "padding": "24px",
+    }
+    tab_style = {"backgroundColor": t["bg"], "paddingTop": "20px"}
+    controls_style = {
+        "display": "flex", "justifyContent": "center", "alignItems": "center",
+        "marginBottom": "20px", "gap": "12px", "flexWrap": "wrap",
+        "backgroundColor": t["card_bg"], "borderRadius": "5px",
+        "padding": "16px 24px", "border": f"1px solid {t['border']}",
+    }
+    header_style = {"textAlign": "center", "marginBottom": "0", "color": t["text"], "fontFamily": REDIS_FONT}
+    return main_style, tab_style, controls_style, header_style
+
+
+# ---------------------------------------------------------------------------
+# Callback: Auto-refresh interval control
+# ---------------------------------------------------------------------------
+@app.callback(
+    [Output("auto-refresh-interval", "interval"), Output("auto-refresh-interval", "disabled")],
+    Input("auto-refresh-dropdown", "value"),
+)
+def set_auto_refresh(value):
+    if value == "off":
+        return 60_000, True
+    return int(value) * 1000, False
+
+
+# ---------------------------------------------------------------------------
+# Callback: Refresh data (manual + auto)
 # ---------------------------------------------------------------------------
 @app.callback(
     [
@@ -424,15 +583,15 @@ def _fmt_cost(v: float) -> str:
         Output("date-range", "start_date"),
         Output("date-range", "end_date"),
     ],
-    Input("refresh-btn", "n_clicks"),
+    [Input("refresh-btn", "n_clicks"), Input("auto-refresh-interval", "n_intervals")],
     prevent_initial_call=True,
 )
-def refresh_data(n_clicks):
-    global df, pricing
-    df, pricing = _load_and_prepare()
+def refresh_data(n_clicks, n_intervals):
+    global df, pricing, tool_df
+    df, pricing, tool_df = _load_and_prepare()
     min_date = df["finished_at"].min() if not df.empty else None
     max_date = df["finished_at"].max() if not df.empty else None
-    return n_clicks, min_date, max_date, min_date, max_date
+    return (n_clicks or 0) + (n_intervals or 0), min_date, max_date, min_date, max_date
 
 
 # ---------------------------------------------------------------------------
@@ -459,14 +618,21 @@ def refresh_data(n_clicks):
         Output("token-efficiency", "figure"),
         Output("burn-rate", "figure"),
         Output("session-duration", "figure"),
+        Output("model-comparison", "figure"),
+        Output("tool-usage-chart", "figure"),
+        Output("session-data-table-container", "children"),
+        Output("cost-session-table-container", "children"),
     ],
     [
         Input("date-range", "start_date"),
         Input("date-range", "end_date"),
         Input("refresh-trigger", "data"),
+        Input("theme-store", "data"),
     ],
 )
-def update_dashboard(start_date, end_date, _refresh):
+def update_dashboard(start_date, end_date, _refresh, theme):
+    t = _theme_vals(theme or "dark")
+    tpl = t["template"]
     dff = _filter(start_date, end_date)
 
     # --- Subtitle ---
@@ -509,7 +675,7 @@ def update_dashboard(start_date, end_date, _refresh):
             line=dict(color=color, width=1.5), connectgaps=False,
         ))
     fig_time.update_layout(
-        template=PLOT_TEMPLATE, title="Token Usage Over Time",
+        template=tpl, title="Token Usage Over Time",
         xaxis_title="Time", yaxis_title="Tokens",
         margin=dict(l=50, r=20, t=40, b=40), legend=dict(orientation="h", y=-0.15),
     )
@@ -532,7 +698,7 @@ def update_dashboard(start_date, end_date, _refresh):
         marker_color=filtered_colors if filtered_colors else [REDIS_RED],
     ))
     fig_breakdown.update_layout(
-        template=PLOT_TEMPLATE, title="Token Breakdown by Type",
+        template=tpl, title="Token Breakdown by Type",
         xaxis_title="Total Tokens", yaxis_title="",
         margin=dict(l=140, r=20, t=40, b=40),
     )
@@ -559,7 +725,7 @@ def update_dashboard(start_date, end_date, _refresh):
     ))
     # Add cost as text annotation
     fig_session.update_layout(
-        template=PLOT_TEMPLATE, title="Top 20 Sessions by Total Tokens",
+        template=tpl, title="Top 20 Sessions by Total Tokens",
         barmode="stack", xaxis_title="Tokens", yaxis_title="Session",
         margin=dict(l=110, r=80, t=40, b=40), legend=dict(orientation="h", y=-0.15),
     )
@@ -589,7 +755,7 @@ def update_dashboard(start_date, end_date, _refresh):
         marker=dict(colors=REDIS_COLORWAY),
     ))
     fig_model.update_layout(
-        template=PLOT_TEMPLATE, title="Token Consumption by Model",
+        template=tpl, title="Token Consumption by Model",
         margin=dict(l=20, r=20, t=40, b=40),
     )
 
@@ -605,7 +771,7 @@ def update_dashboard(start_date, end_date, _refresh):
             fill="tozeroy", fillcolor="rgba(255,68,56,0.15)",
         ))
     fig_cost_time.update_layout(
-        template=PLOT_TEMPLATE, title="Cumulative Estimated Cost Over Time",
+        template=tpl, title="Cumulative Estimated Cost Over Time",
         xaxis_title="Time", yaxis_title="Cost (USD)",
         margin=dict(l=60, r=20, t=40, b=40),
     )
@@ -623,7 +789,7 @@ def update_dashboard(start_date, end_date, _refresh):
         textposition="auto",
     ))
     fig_cost_model.update_layout(
-        template=PLOT_TEMPLATE, title="Estimated Cost by Model",
+        template=tpl, title="Estimated Cost by Model",
         xaxis_title="Cost (USD)", yaxis_title="",
         margin=dict(l=140, r=20, t=40, b=40),
     )
@@ -643,7 +809,7 @@ def update_dashboard(start_date, end_date, _refresh):
         connectgaps=False,
     ))
     fig_cache.update_layout(
-        template=PLOT_TEMPLATE, title="Cache Efficiency Over Time",
+        template=tpl, title="Cache Efficiency Over Time",
         xaxis_title="Time", yaxis_title="Tokens",
         margin=dict(l=50, r=20, t=40, b=40), legend=dict(orientation="h", y=-0.15),
     )
@@ -662,11 +828,11 @@ def update_dashboard(start_date, end_date, _refresh):
             hm_matrix[dow, hour] = row["total"]
         fig_heatmap = go.Figure(go.Heatmap(
             z=hm_matrix, x=list(range(24)), y=dow_names,
-            colorscale=[[0, REDIS_BG], [0.5, REDIS_SECTION_BG], [1, REDIS_RED]],
+            colorscale=[[0, t["bg"]], [0.5, t["section_bg"]], [1, REDIS_RED]],
             hovertemplate="Hour: %{x}<br>Day: %{y}<br>Tokens: %{z:,.0f}<extra></extra>",
         ))
     fig_heatmap.update_layout(
-        template=PLOT_TEMPLATE, title="Hourly Activity Heatmap",
+        template=tpl, title="Hourly Activity Heatmap",
         xaxis_title="Hour of Day", yaxis_title="",
         margin=dict(l=60, r=20, t=40, b=40),
     )
@@ -687,7 +853,7 @@ def update_dashboard(start_date, end_date, _refresh):
             fig_ctx.add_vline(x=80, line_dash="dash", line_color=REDIS_RED_HOVER,
                               annotation_text="80% warning", annotation_font_color=REDIS_RED_HOVER)
     fig_ctx.update_layout(
-        template=PLOT_TEMPLATE, title="Context Window Utilization",
+        template=tpl, title="Context Window Utilization",
         xaxis_title="% Context Used", yaxis_title="Count",
         margin=dict(l=50, r=20, t=40, b=40),
     )
@@ -714,7 +880,7 @@ def update_dashboard(start_date, end_date, _refresh):
                 showlegend=True,
             ))
     fig_efficiency.update_layout(
-        template=PLOT_TEMPLATE, title="Token Efficiency (Input vs Output per Session)",
+        template=tpl, title="Token Efficiency (Input vs Output per Session)",
         xaxis_title="Total Input Tokens", yaxis_title="Total Output Tokens",
         margin=dict(l=60, r=20, t=40, b=40), legend=dict(orientation="h", y=-0.15),
     )
@@ -743,7 +909,7 @@ def update_dashboard(start_date, end_date, _refresh):
                 line=dict(color=REDIS_RED_HOVER, dash="dash", width=2),
             ))
     fig_burn.update_layout(
-        template=PLOT_TEMPLATE, title="Daily Burn Rate + 30-Day Projection",
+        template=tpl, title="Daily Burn Rate + 30-Day Projection",
         xaxis_title="Date", yaxis_title="Cost (USD)",
         margin=dict(l=60, r=20, t=40, b=40), legend=dict(orientation="h", y=-0.15),
     )
@@ -761,9 +927,152 @@ def update_dashboard(start_date, end_date, _refresh):
                 name="Sessions",
             ))
     fig_duration.update_layout(
-        template=PLOT_TEMPLATE, title="Session Duration Distribution",
+        template=tpl, title="Session Duration Distribution",
         xaxis_title="Duration (minutes)", yaxis_title="Count",
         margin=dict(l=50, r=20, t=40, b=40),
+    )
+
+    # --- 13. Model Comparison: cost per 1K output tokens ---
+    fig_model_comp = go.Figure()
+    if not dff.empty:
+        mc = dff.groupby("model_id").agg(total_cost=("cost_usd", "sum"), total_output=("output_tokens", "sum")).reset_index()
+        mc = mc[mc["total_output"] > 0]
+        if not mc.empty:
+            mc["cost_per_1k"] = (mc["total_cost"] / mc["total_output"]) * 1000
+            mc = mc.sort_values("cost_per_1k")
+            fig_model_comp.add_trace(go.Bar(
+                x=mc["model_id"], y=mc["cost_per_1k"],
+                marker_color=REDIS_RED,
+                text=[f"${v:.4f}" for v in mc["cost_per_1k"]],
+                textposition="auto",
+            ))
+    fig_model_comp.update_layout(
+        template=tpl, title="Cost per 1K Output Tokens by Model",
+        xaxis_title="Model", yaxis_title="USD per 1K Output Tokens",
+        margin=dict(l=60, r=20, t=40, b=40),
+    )
+
+    # --- 14. Tool Usage Analysis ---
+    fig_tools = go.Figure()
+    if not tool_df.empty:
+        tool_agg = tool_df.groupby("tool_name")["count"].sum().sort_values(ascending=False).head(20)
+        if not tool_agg.empty:
+            fig_tools.add_trace(go.Bar(
+                y=tool_agg.index[::-1], x=tool_agg.values[::-1],
+                orientation="h", marker_color=REDIS_RED,
+            ))
+            fig_tools.update_layout(
+                template=tpl, title="Top 20 Most-Used Tools",
+                xaxis_title="Usage Count", yaxis_title="",
+                margin=dict(l=200, r=20, t=40, b=40),
+            )
+        else:
+            fig_tools.update_layout(
+                template=tpl,
+                annotations=[dict(text="Tool usage data not available", showarrow=False,
+                                  font=dict(color=t["text_muted"], size=16), xref="paper", yref="paper", x=0.5, y=0.5)],
+            )
+    else:
+        fig_tools.update_layout(
+            template=tpl,
+            annotations=[dict(text="Tool usage data not available", showarrow=False,
+                              font=dict(color=t["text_muted"], size=16), xref="paper", yref="paper", x=0.5, y=0.5)],
+        )
+
+    # --- 15. Sortable Session Data Table ---
+    table_style_header = {
+        "backgroundColor": t["section_bg"], "color": t["text"],
+        "fontWeight": "bold", "border": f"1px solid {t['border']}",
+        "fontFamily": REDIS_FONT,
+    }
+    table_style_cell = {
+        "backgroundColor": t["card_bg"], "color": t["text"],
+        "border": f"1px solid {t['border']}", "textAlign": "center",
+        "padding": "10px", "fontFamily": REDIS_FONT,
+    }
+    table_style_odd = [{"if": {"row_index": "odd"}, "backgroundColor": t["section_bg"]}]
+
+    session_table_data = []
+    if not dff.empty:
+        for sid, grp in dff.groupby("session_id"):
+            session_table_data.append({
+                "session_id": str(sid)[:8],
+                "model": grp["model_id"].iloc[0] or "",
+                "created": str(grp["created"].iloc[0])[:19] if pd.notna(grp["created"].iloc[0]) else "",
+                "exchanges": len(grp),
+                "input_tokens": int(grp["input_tokens"].sum()),
+                "output_tokens": int(grp["output_tokens"].sum()),
+                "cache_tokens": int(grp["cache_read_input_tokens"].sum()),
+                "cost": round(float(grp["cost_usd"].sum()), 4),
+            })
+
+    session_data_table = dash_table.DataTable(
+        id="session-data-table",
+        columns=[
+            {"name": "Session ID", "id": "session_id"},
+            {"name": "Model", "id": "model"},
+            {"name": "Created", "id": "created"},
+            {"name": "Exchanges", "id": "exchanges", "type": "numeric"},
+            {"name": "Input Tokens", "id": "input_tokens", "type": "numeric", "format": {"specifier": ","}},
+            {"name": "Output Tokens", "id": "output_tokens", "type": "numeric", "format": {"specifier": ","}},
+            {"name": "Cache Tokens", "id": "cache_tokens", "type": "numeric", "format": {"specifier": ","}},
+            {"name": "Cost (USD)", "id": "cost", "type": "numeric", "format": {"specifier": "$.4f"}},
+        ],
+        data=session_table_data,
+        sort_action="native",
+        filter_action="native",
+        page_size=20,
+        style_header=table_style_header,
+        style_cell=table_style_cell,
+        style_data_conditional=table_style_odd,
+        style_table={"overflowX": "auto"},
+    )
+
+    # --- 16. Cost Per Session Breakdown Table ---
+    cost_session_data = []
+    if not dff.empty:
+        sess_times = dff.groupby("session_id")["finished_at"].agg(["min", "max"])
+        sess_times["duration_min"] = (sess_times["max"] - sess_times["min"]).dt.total_seconds() / 60
+        for sid, grp in dff.groupby("session_id"):
+            dur = round(sess_times.loc[sid, "duration_min"], 1) if sid in sess_times.index else 0
+            cost_session_data.append({
+                "session_id": str(sid)[:8],
+                "model": grp["model_id"].iloc[0] or "",
+                "duration_min": dur,
+                "exchanges": len(grp),
+                "input_tokens": int(grp["input_tokens"].sum()),
+                "output_tokens": int(grp["output_tokens"].sum()),
+                "cost": round(float(grp["cost_usd"].sum()), 4),
+            })
+
+    # Conditional formatting for cost > $5
+    cost_conditional = list(table_style_odd) + [
+        {
+            "if": {"filter_query": "{cost} > 5", "column_id": "cost"},
+            "color": REDIS_RED,
+            "fontWeight": "bold",
+        },
+    ]
+
+    cost_session_table = dash_table.DataTable(
+        id="cost-session-table",
+        columns=[
+            {"name": "Session ID", "id": "session_id"},
+            {"name": "Model", "id": "model"},
+            {"name": "Duration (min)", "id": "duration_min", "type": "numeric"},
+            {"name": "Exchanges", "id": "exchanges", "type": "numeric"},
+            {"name": "Input Tokens", "id": "input_tokens", "type": "numeric", "format": {"specifier": ","}},
+            {"name": "Output Tokens", "id": "output_tokens", "type": "numeric", "format": {"specifier": ","}},
+            {"name": "Cost (USD)", "id": "cost", "type": "numeric", "format": {"specifier": "$.4f"}},
+        ],
+        data=cost_session_data,
+        sort_action="native",
+        filter_action="native",
+        page_size=20,
+        style_header=table_style_header,
+        style_cell=table_style_cell,
+        style_data_conditional=cost_conditional,
+        style_table={"overflowX": "auto"},
     )
 
     return (
@@ -774,6 +1083,8 @@ def update_dashboard(start_date, end_date, _refresh):
         fig_time, fig_breakdown, fig_session, fig_model,
         fig_cost_time, fig_cost_model, fig_cache,
         fig_heatmap, fig_ctx, fig_efficiency, fig_burn, fig_duration,
+        fig_model_comp, fig_tools,
+        session_data_table, cost_session_table,
     )
 
 
@@ -788,9 +1099,12 @@ def update_dashboard(start_date, end_date, _refresh):
         Input("date-range", "end_date"),
         Input("refresh-trigger", "data"),
         Input("summary-toggle", "value"),
+        Input("theme-store", "data"),
     ],
 )
-def update_daily_weekly(start_date, end_date, _refresh, period):
+def update_daily_weekly(start_date, end_date, _refresh, period, theme):
+    t = _theme_vals(theme or "dark")
+    tpl = t["template"]
     dff = _filter(start_date, end_date)
     fig = go.Figure()
     freq = "D" if period == "daily" else "W"
@@ -818,11 +1132,11 @@ def update_daily_weekly(start_date, end_date, _refresh, period):
             fig.update_layout(
                 yaxis2=dict(
                     title="Cost (USD)", overlaying="y", side="right",
-                    gridcolor=REDIS_SECTION_BG, zerolinecolor=REDIS_SECTION_BG,
+                    gridcolor=t["section_bg"], zerolinecolor=t["section_bg"],
                 ),
             )
     fig.update_layout(
-        template=PLOT_TEMPLATE, title=f"{label} Token Usage & Cost",
+        template=tpl, title=f"{label} Token Usage & Cost",
         xaxis_title="Date", yaxis_title="Total Tokens",
         margin=dict(l=60, r=60, t=40, b=40), legend=dict(orientation="h", y=-0.15),
         barmode="overlay",
@@ -925,15 +1239,17 @@ def import_team_data(contents_list, filenames, existing_data):
         Output("team-model-pie", "figure"),
         Output("team-table", "data"),
     ],
-    [Input("team-data-store", "data"), Input("main-tabs", "value")],
+    [Input("team-data-store", "data"), Input("main-tabs", "value"), Input("theme-store", "data")],
 )
-def update_team_tab(team_data, active_tab):
+def update_team_tab(team_data, active_tab, theme):
+    t = _theme_vals(theme or "dark")
+    tpl = t["template"]
     if active_tab != "team-usage" or not team_data:
         empty_fig = go.Figure()
         empty_fig.update_layout(
-            template=PLOT_TEMPLATE,
+            template=tpl,
             annotations=[dict(text="Import team data to see charts", showarrow=False,
-                              font=dict(color=REDIS_TEXT_MUTED, size=16), xref="paper", yref="paper", x=0.5, y=0.5)],
+                              font=dict(color=t["text_muted"], size=16), xref="paper", yref="paper", x=0.5, y=0.5)],
         )
         return "0", "0", "0", "$0.00", empty_fig, empty_fig, empty_fig, []
 
@@ -970,7 +1286,7 @@ def update_team_tab(team_data, active_tab):
         textposition="auto",
     ))
     fig_cost.update_layout(
-        template=PLOT_TEMPLATE, title="Cost per Team Member",
+        template=tpl, title="Cost per Team Member",
         xaxis_title="", yaxis_title="Cost (USD)",
         margin=dict(l=60, r=20, t=40, b=40),
     )
@@ -986,7 +1302,7 @@ def update_team_tab(team_data, active_tab):
         name="Output", marker_color="#8AB4C7",
     ))
     fig_tokens.update_layout(
-        template=PLOT_TEMPLATE, title="Tokens per Team Member",
+        template=tpl, title="Tokens per Team Member",
         barmode="stack", xaxis_title="", yaxis_title="Tokens",
         margin=dict(l=60, r=20, t=40, b=40), legend=dict(orientation="h", y=-0.15),
     )
@@ -1000,7 +1316,7 @@ def update_team_tab(team_data, active_tab):
         marker=dict(colors=REDIS_COLORWAY),
     ))
     fig_model.update_layout(
-        template=PLOT_TEMPLATE, title="Model Usage Across Team",
+        template=tpl, title="Model Usage Across Team",
         margin=dict(l=20, r=20, t=40, b=40),
     )
 
