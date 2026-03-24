@@ -1,3 +1,5 @@
+import os
+
 from dash import Dash, html, dcc, Input, Output, State, callback_context, no_update, dash_table
 import plotly.express as px
 import plotly.graph_objects as go
@@ -750,4 +752,5 @@ def update_team_tab(team_data, active_tab):
 # Run
 # ---------------------------------------------------------------------------
 if __name__ == "__main__":
-    app.run(port=8050, debug=False)
+    host = os.environ.get("HOST", "127.0.0.1")
+    app.run(host=host, port=8050, debug=False)

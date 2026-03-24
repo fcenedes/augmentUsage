@@ -1,0 +1,13 @@
+services:
+  dashboard:
+    build: .
+    ports:
+      - "8050:8050"
+    volumes:
+      - ${HOME}/.augment/sessions:/data/sessions:ro
+    environment:
+      - AUGMENT_SESSIONS_DIR=/data/sessions
+      - AUGMENT_USERNAME=${USER}
+      - HOST=0.0.0.0
+    restart: unless-stopped
+

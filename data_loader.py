@@ -38,7 +38,7 @@ def load_sessions(sessions_dir: str | None = None) -> pd.DataFrame:
         plus all TOKEN_FIELDS.
     """
     if sessions_dir is None:
-        sessions_dir = os.path.expanduser("~/.augment/sessions")
+        sessions_dir = os.environ.get("AUGMENT_SESSIONS_DIR") or os.path.expanduser("~/.augment/sessions")
 
     sessions_path = Path(sessions_dir)
     if not sessions_path.is_dir():
@@ -153,8 +153,8 @@ def fetch_pricing() -> dict[str, dict[str, float]]:
 
 
 def get_username() -> str:
-    """Auto-detect the current username from the home directory path."""
-    return Path.home().name
+    """Return the username from AUGMENT_USERNAME env var, or fall back to home directory name."""
+    return os.environ.get("AUGMENT_USERNAME") or Path.home().name
 
 
 def compute_cost(row: pd.Series, pricing: dict[str, dict[str, float]]) -> float:
