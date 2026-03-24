@@ -128,7 +128,7 @@ def _theme_vals(theme: str) -> dict:
 CARD_STYLE = {
     "backgroundColor": REDIS_CARD_BG,
     "borderRadius": "5px",
-    "padding": "20px",
+    "padding": "24px",
     "textAlign": "center",
     "flex": "1",
     "minWidth": "160px",
