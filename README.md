@@ -4,33 +4,65 @@ A Python Dash dashboard that visualizes your Augment AI token consumption and es
 
 ## Features
 
+- **Redis-branded UI** — dark/light theme with Redis brand colors, Space Grotesk/Mono fonts
 - **Token usage tracking** — input, output, cache read, cache creation tokens over time
 - **Cost estimation** — estimated USD costs using live pricing from [llm-prices.com](https://www.llm-prices.com/)
 - **Model breakdown** — token consumption and cost by model (Claude Opus, Sonnet, Haiku)
+- **Model comparison** — cost per 1K output tokens across models
 - **Session analysis** — top sessions by token usage with cost annotations
 - **Cache efficiency** — cache read vs creation patterns
+- **Daily/weekly summary** — aggregated token and cost trends
+- **Hourly activity heatmap** — when you use Augment most (hour × day of week)
+- **Context window utilization** — how close you get to the 204K token limit
+- **Token efficiency ratio** — output-to-input ratio per session by model
+- **Daily burn rate** — daily cost with 30-day projection
+- **Session duration** — distribution of session lengths
+- **Sortable data tables** — full session list and cost breakdown with search/filter
 - **Date range filtering** — filter all charts by date range
+- **Dark/light theme toggle** — switch between Redis dark and light themes
+- **Auto-refresh** — configurable auto-refresh interval (1/5/15 min)
 - **Live refresh** — reload session data without restarting
 - **Export/Import** — export your usage data as JSON, import team members' data
 - **Team view** — aggregated team usage tab with per-member breakdown
+- **Docker support** — one-command deployment with docker compose
 
 ## Screenshots
 
-### Dashboard Overview
-
-![Dashboard overview with summary cards and controls](screenshots/dashboard-overview.png)
+### Dashboard Overview (Dark Theme)
+![Header, summary cards, and controls](screenshots/redis-header-cards.png)
 
 ### Token Usage & Breakdown
+![Token usage over time and breakdown by type](screenshots/redis-token-charts.png)
 
-![Token usage over time and breakdown by type](screenshots/dashboard-charts.png)
+### Sessions & Model Analysis
+![Top sessions and model usage pie chart](screenshots/redis-sessions-models.png)
+
+### Model Comparison & Tool Usage
+![Cost per 1K output tokens and tool usage](screenshots/redis-model-comparison.png)
 
 ### Cost Analysis
+![Cumulative cost and cost by model](screenshots/redis-cost-charts.png)
 
-![Cumulative cost over time and cost by model](screenshots/dashboard-costs.png)
+### Cache Efficiency
+![Cache read vs creation over time](screenshots/redis-cache-efficiency.png)
 
-### Team Usage Tab
+### Daily Summary & Heatmap
+![Daily token/cost summary and hourly activity heatmap](screenshots/redis-daily-summary.png)
 
-![Team usage tab for aggregated team data](screenshots/dashboard-team.png)
+### Context Window & Token Efficiency
+![Context utilization histogram and efficiency scatter plot](screenshots/redis-heatmap-context.png)
+
+### Burn Rate & Session Duration
+![Daily burn rate projection and session duration distribution](screenshots/redis-efficiency-burnrate.png)
+
+### Cost Per Session Table
+![Sortable cost breakdown table with conditional formatting](screenshots/redis-cost-table.png)
+
+### Session Data Table
+![Full session data table with search and filter](screenshots/redis-session-table.png)
+
+### Light Theme
+![Dashboard in light theme mode](screenshots/redis-light-theme.png)
 
 ## Quick Start
 
