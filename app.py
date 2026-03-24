@@ -251,6 +251,22 @@ def update_dashboard(start_date, end_date, _refresh):
     total_cache = int(dff["cache_read_input_tokens"].sum())
     total_cost = dff["cost_usd"].sum()
 
+    # --- Prepare line-chart dataframe with gaps between sessions ---
+    dff_plot = dff.sort_values("finished_at").copy()
+    if len(dff_plot) > 1:
+        time_diff = dff_plot["finished_at"].diff()
+        gap_mask = time_diff > pd.Timedelta(minutes=5)
+        gap_indices = dff_plot.index[gap_mask]
+        gap_rows = []
+        for idx in gap_indices:
+            gap_row = dff_plot.loc[idx].copy()
+            for col in TOKEN_COLS + ["cost_usd"]:
+                gap_row[col] = float("nan")
+            gap_row["finished_at"] = dff_plot.loc[idx, "finished_at"] - pd.Timedelta(seconds=1)
+            gap_rows.append(gap_row)
+        if gap_rows:
+            dff_plot = pd.concat([dff_plot, pd.DataFrame(gap_rows)]).sort_values("finished_at")
+
     # --- 1. Token usage over time (replace 0 with NaN so Plotly skips them) ---
     fig_time = go.Figure()
     for col, name, color in [
@@ -258,9 +274,9 @@ def update_dashboard(start_date, end_date, _refresh):
         ("output_tokens", "Output", "#EF553B"),
         ("cache_read_input_tokens", "Cache Read", "#00CC96"),
     ]:
-        y_vals = dff[col].replace(0, np.nan)
+        y_vals = dff_plot[col].replace(0, np.nan)
         fig_time.add_trace(go.Scatter(
-            x=dff["finished_at"], y=y_vals, mode="lines", name=name,
+            x=dff_plot["finished_at"], y=y_vals, mode="lines", name=name,
             line=dict(color=color, width=1.5), connectgaps=False,
         ))
     fig_time.update_layout(
@@ -391,15 +407,15 @@ def update_dashboard(start_date, end_date, _refresh):
 
     # --- 7. Cache efficiency (replace 0 with NaN) ---
     fig_cache = go.Figure()
-    cache_read_vals = dff["cache_read_input_tokens"].replace(0, np.nan)
-    cache_create_vals = dff["cache_creation_input_tokens"].replace(0, np.nan)
+    cache_read_vals = dff_plot["cache_read_input_tokens"].replace(0, np.nan)
+    cache_create_vals = dff_plot["cache_creation_input_tokens"].replace(0, np.nan)
     fig_cache.add_trace(go.Scatter(
-        x=dff["finished_at"], y=cache_read_vals,
+        x=dff_plot["finished_at"], y=cache_read_vals,
         mode="lines", name="Cache Read", line=dict(color="#00CC96", width=1.5),
         connectgaps=False,
     ))
     fig_cache.add_trace(go.Scatter(
-        x=dff["finished_at"], y=cache_create_vals,
+        x=dff_plot["finished_at"], y=cache_create_vals,
         mode="lines", name="Cache Creation", line=dict(color="#FFA15A", width=1.5),
         connectgaps=False,
     ))
