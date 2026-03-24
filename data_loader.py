@@ -152,6 +152,11 @@ def fetch_pricing() -> dict[str, dict[str, float]]:
     return prices
 
 
+def get_username() -> str:
+    """Auto-detect the current username from the home directory path."""
+    return Path.home().name
+
+
 def compute_cost(row: pd.Series, pricing: dict[str, dict[str, float]]) -> float:
     """Compute estimated cost in USD for a single exchange row."""
     llm_id = MODEL_ID_MAP.get(row.get("model_id", ""), "")

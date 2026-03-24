@@ -1,9 +1,12 @@
-from dash import Dash, html, dcc, Input, Output, State, callback_context
+from dash import Dash, html, dcc, Input, Output, State, callback_context, no_update, dash_table
 import plotly.express as px
 import plotly.graph_objects as go
 import numpy as np
 import pandas as pd
-from data_loader import load_sessions, fetch_pricing, compute_cost, MODEL_ID_MAP
+import json
+import base64
+from datetime import datetime
+from data_loader import load_sessions, fetch_pricing, compute_cost, MODEL_ID_MAP, get_username
 
 # ---------------------------------------------------------------------------
 # Data
@@ -33,7 +36,9 @@ df, pricing = _load_and_prepare()
 # ---------------------------------------------------------------------------
 # App
 # ---------------------------------------------------------------------------
-app = Dash(__name__)
+app = Dash(__name__, suppress_callback_exceptions=True)
+
+USERNAME = get_username()
 
 CARD_STYLE = {
     "backgroundColor": "#1e1e2f",
@@ -46,6 +51,32 @@ CARD_STYLE = {
 CARD_TITLE = {"color": "#aaa", "fontSize": "0.85rem", "marginBottom": "6px"}
 CARD_VALUE = {"color": "#fff", "fontSize": "1.6rem", "fontWeight": "bold"}
 PLOT_TEMPLATE = "plotly_dark"
+
+BTN_STYLE = {
+    "backgroundColor": "#3a3a5c",
+    "color": "#fff",
+    "border": "1px solid #555",
+    "borderRadius": "6px",
+    "padding": "8px 16px",
+    "cursor": "pointer",
+    "fontSize": "0.9rem",
+}
+
+TAB_STYLE = {
+    "backgroundColor": "#1e1e2f",
+    "color": "#aaa",
+    "border": "1px solid #333",
+    "borderBottom": "1px solid #333",
+    "padding": "10px 20px",
+    "borderRadius": "6px 6px 0 0",
+}
+
+TAB_SELECTED_STYLE = {
+    **TAB_STYLE,
+    "backgroundColor": "#2a2a4a",
+    "color": "#fff",
+    "borderBottom": "1px solid #2a2a4a",
+}
 
 
 def _fmt(n: int) -> str:
@@ -79,18 +110,27 @@ app.layout = html.Div(
         "padding": "24px",
     },
     children=[
+        # Hidden stores
+        dcc.Store(id="refresh-trigger", data=0),
+        dcc.Store(id="team-data-store", storage_type="session", data=[]),
+        dcc.Download(id="download-export"),
+
+        # Header
         html.H1(
-            "Augment Session Dashboard",
+            f"Augment Session Dashboard — {USERNAME}",
             style={"textAlign": "center", "marginBottom": "4px", "color": "#fff"},
         ),
 
-        # Hidden store for refresh trigger
-        dcc.Store(id="refresh-trigger", data=0),
-        # Date range picker + refresh button
+        # Controls bar: date range + buttons
         html.Div(
-            style={"display": "flex", "justifyContent": "center", "alignItems": "center", "marginBottom": "20px", "gap": "12px"},
+            style={
+                "display": "flex", "justifyContent": "center", "alignItems": "center",
+                "marginBottom": "20px", "gap": "12px", "flexWrap": "wrap",
+                "backgroundColor": "#1a1a30", "borderRadius": "10px",
+                "padding": "14px 20px", "border": "1px solid #2a2a4a",
+            },
             children=[
-                html.Label("Date range: ", style={"marginRight": "8px", "paddingTop": "6px"}),
+                html.Span("📅", style={"fontSize": "1.2rem"}),
                 dcc.DatePickerRange(
                     id="date-range",
                     min_date_allowed=df["finished_at"].min() if not df.empty else None,
@@ -99,27 +139,56 @@ app.layout = html.Div(
                     end_date=df["finished_at"].max() if not df.empty else None,
                     style={"backgroundColor": "#1e1e2f"},
                 ),
-                html.Button(
-                    "🔄 Refresh Data",
-                    id="refresh-btn",
-                    n_clicks=0,
-                    style={
-                        "backgroundColor": "#3a3a5c",
-                        "color": "#fff",
-                        "border": "1px solid #555",
-                        "borderRadius": "6px",
-                        "padding": "8px 16px",
-                        "cursor": "pointer",
-                        "fontSize": "0.9rem",
-                    },
+                html.Div(style={"width": "1px", "height": "28px", "backgroundColor": "#444", "margin": "0 4px"}),
+                html.Button("🔄 Refresh", id="refresh-btn", n_clicks=0, style=BTN_STYLE),
+                html.Button("📤 Export My Data", id="export-btn", n_clicks=0, style=BTN_STYLE),
+                dcc.Upload(
+                    id="import-upload",
+                    children=html.Button("📥 Import Team Data", style=BTN_STYLE),
+                    multiple=True,
+                    accept=".json",
                 ),
             ],
         ),
-        # Subtitle (updated on refresh)
-        html.P(
-            id="subtitle",
-            style={"textAlign": "center", "color": "#888", "marginBottom": "20px"},
+
+        # Import status message
+        html.Div(id="import-status", style={"textAlign": "center", "color": "#00CC96", "marginBottom": "10px"}),
+
+        # Tabs
+        dcc.Tabs(
+            id="main-tabs",
+            value="my-usage",
+            children=[
+                dcc.Tab(label="📊 My Usage", value="my-usage", style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE),
+                dcc.Tab(label="👥 Team Usage", value="team-usage", style=TAB_STYLE, selected_style=TAB_SELECTED_STYLE),
+            ],
+            style={"marginBottom": "0px"},
         ),
+
+        # Tab content container
+        html.Div(id="tab-content", style={"backgroundColor": "#121220", "paddingTop": "20px"}),
+    ],
+)
+
+
+# ---------------------------------------------------------------------------
+# Tab rendering callback
+# ---------------------------------------------------------------------------
+@app.callback(
+    Output("tab-content", "children"),
+    Input("main-tabs", "value"),
+)
+def render_tab(tab):
+    if tab == "team-usage":
+        return _team_tab_layout()
+    return _my_usage_layout()
+
+
+def _my_usage_layout():
+    """Return the 'My Usage' tab content (all existing charts)."""
+    return html.Div([
+        # Subtitle
+        html.P(id="subtitle", style={"textAlign": "center", "color": "#888", "marginBottom": "20px"}),
         # Summary cards
         html.Div(
             id="summary-cards",
@@ -164,8 +233,64 @@ app.layout = html.Div(
                 html.Div(dcc.Graph(id="cache-efficiency"), style={"flex": "1", "maxWidth": "900px"}),
             ],
         ),
-    ],
-)
+    ])
+
+
+def _team_tab_layout():
+    """Return the 'Team Usage' tab content."""
+    return html.Div([
+        html.Div(
+            id="team-summary-cards",
+            style={"display": "flex", "gap": "16px", "flexWrap": "wrap", "marginBottom": "24px"},
+            children=[
+                make_card("Team Members", "team-card-members"),
+                make_card("Total Sessions", "team-card-sessions"),
+                make_card("Total Tokens", "team-card-tokens"),
+                make_card("Total Cost", "team-card-cost"),
+            ],
+        ),
+        # Team charts row 1
+        html.Div(
+            style={"display": "flex", "gap": "16px", "flexWrap": "wrap", "marginBottom": "24px"},
+            children=[
+                html.Div(dcc.Graph(id="team-cost-bar"), style={"flex": "1", "minWidth": "400px"}),
+                html.Div(dcc.Graph(id="team-tokens-bar"), style={"flex": "1", "minWidth": "400px"}),
+            ],
+        ),
+        # Team charts row 2
+        html.Div(
+            style={"display": "flex", "gap": "16px", "flexWrap": "wrap", "marginBottom": "24px"},
+            children=[
+                html.Div(dcc.Graph(id="team-model-pie"), style={"flex": "1", "minWidth": "400px"}),
+                html.Div(
+                    dash_table.DataTable(
+                        id="team-table",
+                        columns=[
+                            {"name": "Username", "id": "username"},
+                            {"name": "Sessions", "id": "sessions", "type": "numeric"},
+                            {"name": "Input Tokens", "id": "input_tokens", "type": "numeric", "format": {"specifier": ","}},
+                            {"name": "Output Tokens", "id": "output_tokens", "type": "numeric", "format": {"specifier": ","}},
+                            {"name": "Cost (USD)", "id": "cost", "type": "numeric", "format": {"specifier": "$.4f"}},
+                        ],
+                        style_header={
+                            "backgroundColor": "#2a2a4a", "color": "#fff",
+                            "fontWeight": "bold", "border": "1px solid #444",
+                        },
+                        style_cell={
+                            "backgroundColor": "#1e1e2f", "color": "#e0e0e0",
+                            "border": "1px solid #333", "textAlign": "center",
+                            "padding": "10px",
+                        },
+                        style_data_conditional=[
+                            {"if": {"row_index": "odd"}, "backgroundColor": "#252540"},
+                        ],
+                        page_size=20,
+                    ),
+                    style={"flex": "1", "minWidth": "400px"},
+                ),
+            ],
+        ),
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -433,6 +558,191 @@ def update_dashboard(start_date, end_date, _refresh):
         _fmt_cost(total_cost),
         fig_time, fig_breakdown, fig_session, fig_model,
         fig_cost_time, fig_cost_model, fig_cache,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Callback: Export data
+# ---------------------------------------------------------------------------
+@app.callback(
+    Output("download-export", "data"),
+    Input("export-btn", "n_clicks"),
+    [State("date-range", "start_date"), State("date-range", "end_date")],
+    prevent_initial_call=True,
+)
+def export_data(n_clicks, start_date, end_date):
+    if not n_clicks:
+        return no_update
+    dff = _filter(start_date, end_date)
+    # Build per-session summaries
+    sessions_list = []
+    for sid, grp in dff.groupby("session_id"):
+        sessions_list.append({
+            "session_id": sid,
+            "model_id": grp["model_id"].iloc[0] if not grp.empty else None,
+            "created": str(grp["created"].iloc[0]) if not grp.empty else None,
+            "total_exchanges": len(grp),
+            "input_tokens": int(grp["input_tokens"].sum()),
+            "output_tokens": int(grp["output_tokens"].sum()),
+            "cache_read_input_tokens": int(grp["cache_read_input_tokens"].sum()),
+            "cost_usd": round(float(grp["cost_usd"].sum()), 6),
+        })
+    export_obj = {
+        "username": USERNAME,
+        "export_date": datetime.utcnow().isoformat() + "Z",
+        "date_range": {"start": start_date, "end": end_date},
+        "sessions": sessions_list,
+        "totals": {
+            "sessions": dff["session_id"].nunique(),
+            "exchanges": len(dff),
+            "input_tokens": int(dff["input_tokens"].sum()),
+            "output_tokens": int(dff["output_tokens"].sum()),
+            "cache_read_input_tokens": int(dff["cache_read_input_tokens"].sum()),
+            "cost_usd": round(float(dff["cost_usd"].sum()), 6),
+        },
+    }
+    date_str = datetime.utcnow().strftime("%Y%m%d")
+    filename = f"augment-usage-{USERNAME}-{date_str}.json"
+    return dict(content=json.dumps(export_obj, indent=2), filename=filename)
+
+
+# ---------------------------------------------------------------------------
+# Callback: Import team data
+# ---------------------------------------------------------------------------
+@app.callback(
+    [Output("team-data-store", "data"), Output("import-status", "children")],
+    Input("import-upload", "contents"),
+    [State("import-upload", "filename"), State("team-data-store", "data")],
+    prevent_initial_call=True,
+)
+def import_team_data(contents_list, filenames, existing_data):
+    if not contents_list:
+        return no_update, no_update
+    if existing_data is None:
+        existing_data = []
+    imported_count = 0
+    existing_usernames = {d.get("username") for d in existing_data}
+    for content, fname in zip(contents_list, filenames):
+        try:
+            # Parse base64 content from dcc.Upload
+            content_type, content_string = content.split(",", 1)
+            decoded = base64.b64decode(content_string).decode("utf-8")
+            data = json.loads(decoded)
+            uname = data.get("username", fname)
+            # Replace if same username already imported
+            if uname in existing_usernames:
+                existing_data = [d for d in existing_data if d.get("username") != uname]
+            existing_data.append(data)
+            existing_usernames.add(uname)
+            imported_count += 1
+        except Exception as e:
+            continue
+    total = len(existing_data)
+    msg = f"✅ Imported {imported_count} file(s). Total team members loaded: {total}"
+    return existing_data, msg
+
+
+# ---------------------------------------------------------------------------
+# Callback: Team tab charts
+# ---------------------------------------------------------------------------
+@app.callback(
+    [
+        Output("team-card-members", "children"),
+        Output("team-card-sessions", "children"),
+        Output("team-card-tokens", "children"),
+        Output("team-card-cost", "children"),
+        Output("team-cost-bar", "figure"),
+        Output("team-tokens-bar", "figure"),
+        Output("team-model-pie", "figure"),
+        Output("team-table", "data"),
+    ],
+    [Input("team-data-store", "data"), Input("main-tabs", "value")],
+)
+def update_team_tab(team_data, active_tab):
+    if active_tab != "team-usage" or not team_data:
+        empty_fig = go.Figure()
+        empty_fig.update_layout(
+            template=PLOT_TEMPLATE, paper_bgcolor="#1e1e2f", plot_bgcolor="#1e1e2f",
+            annotations=[dict(text="Import team data to see charts", showarrow=False,
+                              font=dict(color="#888", size=16), xref="paper", yref="paper", x=0.5, y=0.5)],
+        )
+        return "0", "0", "0", "$0.00", empty_fig, empty_fig, empty_fig, []
+
+    # Aggregate per-member data
+    members = []
+    model_usage = {}  # model -> total tokens
+    for entry in team_data:
+        uname = entry.get("username", "unknown")
+        totals = entry.get("totals", {})
+        members.append({
+            "username": uname,
+            "sessions": totals.get("sessions", 0),
+            "input_tokens": totals.get("input_tokens", 0),
+            "output_tokens": totals.get("output_tokens", 0),
+            "cost": totals.get("cost_usd", 0),
+        })
+        # Aggregate model usage from sessions
+        for sess in entry.get("sessions", []):
+            model = sess.get("model_id", "unknown")
+            tokens = sess.get("input_tokens", 0) + sess.get("output_tokens", 0)
+            model_usage[model] = model_usage.get(model, 0) + tokens
+
+    members_df = pd.DataFrame(members)
+    total_members = len(members_df)
+    total_sessions = int(members_df["sessions"].sum())
+    total_tokens = int(members_df["input_tokens"].sum() + members_df["output_tokens"].sum())
+    total_cost = float(members_df["cost"].sum())
+
+    # Cost per member bar chart
+    fig_cost = go.Figure(go.Bar(
+        x=members_df["username"], y=members_df["cost"],
+        marker_color="#AB63FA",
+        text=[_fmt_cost(v) for v in members_df["cost"]],
+        textposition="auto",
+    ))
+    fig_cost.update_layout(
+        template=PLOT_TEMPLATE, title="Cost per Team Member",
+        xaxis_title="", yaxis_title="Cost (USD)",
+        paper_bgcolor="#1e1e2f", plot_bgcolor="#1e1e2f",
+        margin=dict(l=60, r=20, t=40, b=40),
+    )
+
+    # Tokens per member (stacked bar)
+    fig_tokens = go.Figure()
+    fig_tokens.add_trace(go.Bar(
+        x=members_df["username"], y=members_df["input_tokens"],
+        name="Input", marker_color="#636EFA",
+    ))
+    fig_tokens.add_trace(go.Bar(
+        x=members_df["username"], y=members_df["output_tokens"],
+        name="Output", marker_color="#EF553B",
+    ))
+    fig_tokens.update_layout(
+        template=PLOT_TEMPLATE, title="Tokens per Team Member",
+        barmode="stack", xaxis_title="", yaxis_title="Tokens",
+        paper_bgcolor="#1e1e2f", plot_bgcolor="#1e1e2f",
+        margin=dict(l=60, r=20, t=40, b=40), legend=dict(orientation="h", y=-0.15),
+    )
+
+    # Model usage pie chart
+    model_labels = list(model_usage.keys())
+    model_values = list(model_usage.values())
+    fig_model = go.Figure(go.Pie(
+        labels=model_labels, values=model_values, hole=0.45,
+        textinfo="label+percent",
+        marker=dict(colors=px.colors.qualitative.Plotly),
+    ))
+    fig_model.update_layout(
+        template=PLOT_TEMPLATE, title="Model Usage Across Team",
+        paper_bgcolor="#1e1e2f", plot_bgcolor="#1e1e2f",
+        margin=dict(l=20, r=20, t=40, b=40),
+    )
+
+    table_data = members_df.to_dict("records")
+
+    return (
+        str(total_members), _fmt(total_sessions), _fmt(total_tokens), _fmt_cost(total_cost),
+        fig_cost, fig_tokens, fig_model, table_data,
     )
 
 
