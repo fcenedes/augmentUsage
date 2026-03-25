@@ -1,29 +1,65 @@
-# Codex Usage Integration Spec
+# Codex Integration Specs
 
-## Goal
+## Status
 
-Add Codex usage data to the dashboard without changing or regressing the existing Augment behavior.
+This document is a specification and implementation plan only.
 
-The existing Augment pipeline must remain intact:
+No runtime integration should be merged while this document is being reviewed.
 
-- `load_sessions()` in [data_loader.py](/Users/plambert/Documents/Work/augmentUsage/data_loader.py)
-- `extract_tool_usage()` in [data_loader.py](/Users/plambert/Documents/Work/augmentUsage/data_loader.py)
-- `_load_and_prepare()` and all current `df / pricing / tool_df` consumers in [app.py](/Users/plambert/Documents/Work/augmentUsage/app.py)
+Current intent:
 
-The Codex integration must be additive only:
+- keep the existing Augment behavior unchanged
+- plan a Codex integration that can feed the same charts when the metric semantics are truly compatible
+- avoid inventing fake metadata or silently changing chart meaning
 
-- new loader(s)
-- new dataframes
-- new UI section/tab(s)
-- no behavior change in current Augment views
+## Objective
 
-## Source Data
+Extend the dashboard so that Codex usage can be visualized alongside Augment usage on the same charts where the semantics match.
 
-Codex sessions are stored as JSONL event streams under paths like:
+This must preserve the current Augment data model used by [data_loader.py](/Users/plambert/Documents/Work/augmentUsage/data_loader.py) and the current chart consumers in [app.py](/Users/plambert/Documents/Work/augmentUsage/app.py).
 
-- `/Users/plambert/.codex/sessions/2026/03/24/rollout-2026-03-24T12-15-14-019d1f8e-5504-7481-b214-757f70c5b63c.jsonl`
+## Existing Constraints
 
-Observed event types include:
+### Current Augment Model
+
+Today the dashboard assumes an additive dataframe with one row per Augment `token_usage` record.
+
+The current chart pipeline expects at least these columns:
+
+```python
+[
+    "session_id",
+    "model_id",
+    "created",
+    "exchange_idx",
+    "finished_at",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "system_prompt_tokens",
+    "chat_history_tokens",
+    "current_message_tokens",
+    "max_context_tokens",
+    "tool_definitions_tokens",
+    "tool_result_tokens",
+    "assistant_response_tokens",
+]
+```
+
+The existing app logic then derives:
+
+- totals by summing token columns
+- per-session summaries by grouping on `session_id`
+- time charts by grouping on `finished_at`
+- model charts by grouping on `model_id`
+- cost charts through `compute_cost()`
+
+### Current Codex Reality
+
+Codex sessions are JSONL event streams, not a single session JSON document.
+
+Observed event types:
 
 - `session_meta`
 - `task_started`
@@ -36,436 +72,617 @@ Observed event types include:
 - `function_call_output`
 - `turn_aborted`
 
-Important difference versus Augment:
+Observed token payload:
 
-- Augment stores session data as one JSON document with explicit `token_usage` records on response nodes.
-- Codex stores a chronological event log and exposes token usage through repeated `token_count` snapshots.
+```json
+{
+  "total_token_usage": {
+    "input_tokens": 136487,
+    "cached_input_tokens": 103936,
+    "output_tokens": 2122,
+    "reasoning_output_tokens": 1121,
+    "total_tokens": 138609
+  },
+  "last_token_usage": {
+    "input_tokens": 37519,
+    "cached_input_tokens": 37248,
+    "output_tokens": 261,
+    "reasoning_output_tokens": 56,
+    "total_tokens": 37780
+  },
+  "model_context_window": 258400
+}
+```
 
-## Existing Augment Aggregation Model
+## Non-Negotiable Aggregation Rule
 
-Today, Augment token usage is additive at the row level:
+Codex must be aggregated on the same additive model as Augment.
 
-1. `load_sessions()` emits one dataframe row per `response_node.token_usage`.
-2. Each row contains token fields such as `input_tokens`, `output_tokens`, `cache_read_input_tokens`, and `cache_creation_input_tokens`.
-3. Dashboard totals are simple sums over those per-row fields.
-4. Session totals are sums of all rows sharing the same `session_id`.
+That means:
 
-This is the model Codex must match.
+- each Codex row used by charts must represent a true additive increment
+- summing all Codex rows in a session must reproduce the session totals exactly
 
-For Codex, we therefore need an equivalent additive unit. The correct unit is not the raw JSONL line and not the raw `token_count` event as-is. We must derive additive delta rows from the cumulative token snapshots.
+### Why Raw `last_token_usage` Is Unsafe
 
-## Critical Aggregation Rule
+Observed Codex logs contain repeated `token_count` snapshots.
 
-### Problem
+Consequence:
 
-Codex `token_count` events are cumulative snapshots, not guaranteed unique deltas.
+- summing `last_token_usage` across all `token_count` events can overcount
 
-Observed on local samples:
+### Canonical Rule
 
-- `total_token_usage` is monotonic non-decreasing within a session.
-- duplicate snapshots occur in the same session.
-- some duplicate snapshots repeat the same totals with zero real increment.
+The Codex additive unit must be derived from deduplicated cumulative totals:
 
-Example consequence:
+1. read all `token_count` events where `payload.info` is non-null
+2. order them by event timestamp
+3. use `total_token_usage` as the source of truth
+4. drop consecutive duplicate cumulative snapshots
+5. compute the delta between each accepted snapshot and the previous accepted snapshot
+6. emit one additive Codex row per delta
 
-- summing raw `last_token_usage` over all `token_count` events overcounts session totals.
+This is the only approach that matches the existing Augment accounting model.
 
-This means the naive approach is wrong:
+### Aggregation Pseudocode
 
-- wrong: `sum(last_token_usage.*)` across all `token_count` events
-
-### Correct Rule
-
-For Codex, the canonical additive unit must be computed as:
-
-1. Read all `token_count` events with non-null `payload.info`.
-2. Order them by event timestamp.
-3. Use `total_token_usage` as the source of truth.
-4. Drop consecutive duplicate cumulative snapshots.
-5. Compute per-event deltas from the accepted cumulative sequence.
-6. Treat each delta as the Codex equivalent of one Augment `token_usage` row.
-
-This gives the same additive behavior as Augment:
-
-- session total = sum of additive rows
-- period total = sum of additive rows
-- chart series = aggregate additive rows over time
-
-### Why `total_token_usage`, Not `last_token_usage`
-
-`last_token_usage` looks like a delta, but duplicate `token_count` events can replay the same delta again.
-
-`total_token_usage` is safer because:
-
-- it is monotonic in the observed data
-- duplicate snapshots can be deduplicated reliably
-- deltas can be reconstructed exactly from cumulative totals
-
-## Token Field Mapping
-
-Codex exposes these token families in observed logs:
-
-- `input_tokens`
-- `cached_input_tokens`
-- `output_tokens`
-- `reasoning_output_tokens`
-- `total_tokens`
-- `model_context_window`
-
-### Mapping to Existing Dashboard Semantics
-
-To stay aligned with Augment:
-
-- Augment `input_tokens` maps to Codex `input_tokens`
-- Augment `output_tokens` maps to Codex `output_tokens`
-- Augment `cache_read_input_tokens` maps to Codex `cached_input_tokens`
-
-Do not remap or merge these:
-
-- Codex `reasoning_output_tokens` must remain separate
-- Codex `total_tokens` must not replace `input_tokens + output_tokens` blindly in existing charts
-
-### Important Observed Invariant
-
-In the sampled Codex logs:
-
-- `total_tokens = input_tokens + output_tokens`
-- `cached_input_tokens` is not included in `total_tokens`
-- `reasoning_output_tokens` is not included in `total_tokens`
-
-Therefore:
-
-- existing Augment-style "total active tokens" semantics should remain `input + output`
-- cached tokens must be charted separately
-- reasoning tokens should be exposed in Codex-specific cards/charts, not folded into output unless explicitly decided later
-
-## Canonical Codex Aggregation Algorithm
-
-For each `.jsonl` file:
-
-1. Read `session_meta`
-   - extract `session_id`
-   - extract session start timestamp
-   - extract `cwd`
-   - extract `originator`
-   - extract `cli_version`
-   - extract `source`
-   - extract `model_provider`
-
-2. Read all `token_count` events with non-null `payload.info`
-   - parse event timestamp
-   - collect cumulative snapshot:
-     - `input_tokens`
-     - `cached_input_tokens`
-     - `output_tokens`
-     - `reasoning_output_tokens`
-     - `total_tokens`
-     - `model_context_window`
-
-3. Sort snapshots by timestamp
-
-4. Deduplicate consecutive identical cumulative snapshots
-   - duplicate key:
-     - `input_tokens`
-     - `cached_input_tokens`
-     - `output_tokens`
-     - `reasoning_output_tokens`
-     - `total_tokens`
-
-5. Derive additive delta rows
-   - first accepted snapshot:
-     - delta = cumulative snapshot itself
-   - each next accepted snapshot:
-     - delta = current cumulative - previous cumulative
-
-6. Validate each delta
-   - no negative values
-   - `delta_total_tokens == delta_input_tokens + delta_output_tokens`
-   - if invalid, log warning and skip or quarantine the row
-
-7. Emit one Codex usage row per accepted delta
-
-### Pseudocode
-
-```text
+```python
 accepted = []
-for snapshot in token_count_snapshots_sorted:
-    if accepted is empty:
+
+for snapshot in snapshots_sorted_by_timestamp:
+    if not accepted:
         accepted.append(snapshot)
-    else if snapshot.cumulative_key != accepted[-1].cumulative_key:
+        continue
+    if snapshot.cumulative_key != accepted[-1].cumulative_key:
         accepted.append(snapshot)
 
 deltas = []
-for i, snapshot in enumerate(accepted):
-    if i == 0:
-        delta = snapshot.total
+prev = None
+for snapshot in accepted:
+    if prev is None:
+        delta = snapshot.total_usage
     else:
-        delta = snapshot.total - accepted[i - 1].total
+        delta = snapshot.total_usage - prev.total_usage
     deltas.append(delta)
+    prev = snapshot
 ```
 
-## Required Dataframes
+## Field Mapping
 
-### 1. `codex_usage_df`
+### Fields That Can Be Mapped Directly
 
-Purpose:
+These Codex metrics are semantically compatible with current Augment charts:
 
-- additive dataframe equivalent to Augment `df`
+- Codex `input_tokens` -> dashboard `input_tokens`
+- Codex `output_tokens` -> dashboard `output_tokens`
+- Codex `cached_input_tokens` -> dashboard `cache_read_input_tokens`
+- Codex `model_context_window` -> dashboard `max_context_tokens`
 
-One row per derived Codex token delta.
+### Fields That Must Stay Separate
 
-Required columns:
+These must not be folded silently into existing Augment fields:
 
-- `source` = `codex`
-- `session_id`
-- `created`
-- `finished_at`
-- `event_idx`
-- `cwd`
-- `model_provider`
-- `input_tokens`
-- `cached_input_tokens`
-- `output_tokens`
-- `reasoning_output_tokens`
-- `total_tokens`
-- `model_context_window`
+- Codex `reasoning_output_tokens`
+- Codex `total_tokens`
+- Codex `model_provider`
+- Codex workspace metadata such as `cwd`
 
-Optional but useful:
+### Important Invariant
 
-- `turn_id`
-- `plan_type`
-- `originator`
-- `cli_version`
+Observed in local Codex logs:
 
-### 2. `codex_sessions_df`
+- `total_tokens = input_tokens + output_tokens`
+- `cached_input_tokens` is not part of `total_tokens`
+- `reasoning_output_tokens` is not part of `total_tokens`
 
-Purpose:
+Therefore:
 
-- session-level summaries for cards, tables, workspace views
+- common charts should continue using `input_tokens + output_tokens` as active total
+- cached tokens remain a separate metric
+- reasoning output becomes a Codex-specific supplemental metric
 
-One row per Codex session.
+## Target Data Model
 
-Required columns:
+The eventual target is a normalized usage dataframe that still preserves the current Augment columns.
 
-- `session_id`
-- `created`
-- `finished_at`
-- `cwd`
-- `model_provider`
-- `session_duration_sec`
-- `input_tokens`
-- `cached_input_tokens`
-- `output_tokens`
-- `reasoning_output_tokens`
-- `total_tokens`
-- `token_events`
-- `task_count`
-- `tool_calls`
+### Required Shared Columns
 
-### 3. `codex_tool_df`
+These are the columns that must exist for both Augment and Codex rows:
 
-Purpose:
+```python
+SHARED_USAGE_COLUMNS = [
+    "session_id",
+    "model_id",
+    "created",
+    "exchange_idx",
+    "finished_at",
+    "input_tokens",
+    "output_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "system_prompt_tokens",
+    "chat_history_tokens",
+    "current_message_tokens",
+    "max_context_tokens",
+    "tool_definitions_tokens",
+    "tool_result_tokens",
+    "assistant_response_tokens",
+]
+```
 
-- Codex-specific tool usage charts
+### Required Metadata Columns
 
-One row per tool call event or one aggregated row per session/tool pair.
+These should be added for source-awareness and gating:
 
-Required columns:
+```python
+NORMALIZED_METADATA_COLUMNS = [
+    "source",
+    "model_provider",
+    "cwd",
+    "originator",
+    "cli_version",
+    "client_source",
+    "plan_type",
+    "turn_id",
+    "reasoning_output_tokens",
+    "total_tokens",
+    "model_context_window",
+    "supports_cost",
+    "supports_token_breakdown",
+    "supports_precise_model_id",
+]
+```
 
-- `session_id`
-- `tool_name`
-- `count`
-- `cwd`
+### Source Rules
 
-## Tool Usage Extraction
+For Augment rows:
 
-Tool usage for Codex must be independent from Augment.
+- `source = "augment"`
+- `supports_cost = True`
+- `supports_token_breakdown = True`
+- `supports_precise_model_id = True`
 
-Source of truth:
+For Codex rows:
 
-- `response_item` events where `payload.type == "function_call"`
+- `source = "codex"`
+- `supports_cost = False`
+- `supports_token_breakdown = False`
+- `supports_precise_model_id = False` unless a real model id is later discovered
 
-Possible supplemental signals:
+## Chart Compatibility Matrix
 
-- `function_call_output`
+### Safe To Combine In V1
 
-Recommended counting rule for v1:
+These charts can use combined Augment + Codex rows once the shared schema exists:
 
-- count each `function_call` as one tool invocation
-- use `payload.name` as `tool_name`
-- aggregate per session and per tool
-
-Do not try to map tool calls to token deltas in v1 unless needed for a specific chart.
-
-## Session Boundaries and Timestamps
-
-Do not infer session timing from the directory path alone.
-
-Use:
-
-- start time: `session_meta.payload.timestamp` when available
-- fallback start time: first event timestamp
-- end time: last event timestamp or last accepted token snapshot timestamp
-
-Reason:
-
-- observed Codex sessions can span beyond the day folder they are stored under
-
-## UX Scope for V1
-
-To avoid breaking existing behavior:
-
-- keep current `My Usage` as Augment-only
-- keep current `Team Usage` unchanged
-- add one new tab: `Codex Usage`
-
-Why:
-
-- Augment charts assume a specific row schema and pricing model
-- Codex has different token semantics and different metadata richness
-- additive isolation is safer than trying to merge sources into the existing callbacks
-
-## Codex V1 Metrics
-
-Recommended summary cards:
-
-- Sessions
-- Input Tokens
-- Output Tokens
-- Cached Input Tokens
-- Reasoning Tokens
-- Tool Calls
-
-Recommended charts:
-
-- token deltas over time
-- cumulative active tokens over time
-- cached vs non-cached input over time
-- reasoning output over time
-- tool calls by tool name
-- sessions by workspace `cwd`
+- summary cards for sessions, exchanges, input, output, cache
+- token usage over time
+- top sessions by token usage
+- cache efficiency
+- hourly activity heatmap
+- context window utilization
+- token efficiency ratio based on output/input
 - session duration distribution
+- daily or weekly token totals
+- tool usage, if tool extraction is normalized too
 
-Recommended tables:
+### Must Stay Metadata-Gated
 
-- session summary table
-- tool usage by session
+These should not include Codex rows in the first rollout:
 
-## Non-Goals for V1
+- cost cards
+- cost over time
+- cost by model
+- daily burn rate
+- model comparison by cost
+- detailed token breakdown using prompt/history/tool subtokens
 
-These should not be added in the first Codex pass:
+### Potentially Misleading If Combined Naively
 
-- changing current Augment callbacks
-- merging Codex into current export/import format
-- estimating Codex cost without a reliable model identifier and pricing source
-- forcing a model breakdown chart when only `model_provider` is reliably visible
+These require a decision before inclusion:
 
-## Configuration
+- model pie chart
+  Reason:
+  Codex currently exposes `model_provider`, not a precise model id.
 
-Add a new configuration input:
+- detailed session tables with cost and prompt breakdown
+  Reason:
+  Codex does not currently expose all of the same subfields.
 
-- `CODEX_SESSIONS_DIR`
+## Step-By-Step Implementation Plan
 
-Default:
+### Step 1: Introduce a Normalized Schema in `data_loader.py`
 
-- `~/.codex/sessions`
+Goal:
 
-Do not reuse:
+- define the shared dataframe contract without changing the current Augment behavior yet
 
-- `AUGMENT_SESSIONS_DIR`
+Planned work:
 
-## Implementation Plan
+- create a normalized column list
+- create helpers to backfill missing metadata columns with defaults
+- leave `load_sessions()` behavior unchanged except for optional metadata enrichment
 
-### Phase 1: Loader
+Planned snippet:
 
-Add new functions in [data_loader.py](/Users/plambert/Documents/Work/augmentUsage/data_loader.py):
+```python
+NORMALIZED_COLUMNS = SHARED_USAGE_COLUMNS + NORMALIZED_METADATA_COLUMNS
 
-- `load_codex_usage()`
-- `load_codex_sessions()`
-- `extract_codex_tool_usage()`
+def _normalize_usage_df(df: pd.DataFrame) -> pd.DataFrame:
+    for col in NORMALIZED_COLUMNS:
+        if col not in df.columns:
+            df[col] = DEFAULTS.get(col)
+    return df[NORMALIZED_COLUMNS]
+```
 
-Keep them separate from:
+Acceptance criteria:
 
-- `load_sessions()`
-- `extract_tool_usage()`
+- existing Augment loader still returns rows consumable by the current app
+- no chart code has been changed yet
 
-### Phase 2: App Wiring
+### Step 2: Add a Codex Raw Reader
 
-In [app.py](/Users/plambert/Documents/Work/augmentUsage/app.py):
+Goal:
 
-- add a Codex load path alongside `_load_and_prepare()`
-- do not rename or overload existing `df`
-- introduce separate globals such as:
-  - `codex_df`
-  - `codex_sessions_df`
-  - `codex_tool_df`
+- parse `.jsonl` files into structured event objects
 
-### Phase 3: UI
+Planned work:
 
-Add a new tab:
+- read `session_meta`
+- collect `token_count`
+- collect `function_call`
+- collect `task_started`, `task_complete`, `turn_context`
 
-- `Codex Usage`
+Planned snippet:
 
-Create new callbacks scoped only to Codex components.
+```python
+def iter_codex_events(path: Path) -> Iterator[dict]:
+    with open(path, encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            yield json.loads(line)
+```
 
-Do not extend the existing large Augment callback in place unless required.
+Acceptance criteria:
 
-### Phase 4: Docs
+- malformed lines are skipped with warnings
+- a session with no token data does not crash parsing
 
-Update [README.md](/Users/plambert/Documents/Work/augmentUsage/README.md) after implementation:
+### Step 3: Build Codex Cumulative Snapshots
 
-- explain the second data source
-- document `CODEX_SESSIONS_DIR`
-- clarify that Augment and Codex are displayed in separate views in v1
+Goal:
 
-## Validation Requirements
+- isolate only the cumulative token snapshots needed for additive reconstruction
 
-The implementation must include checks proving Codex aggregation is safe.
+Planned work:
 
-### Session-Level Validation
+- extract `payload.info.total_token_usage`
+- store timestamp
+- store `turn_id`
+- store `plan_type`
+- store `model_context_window`
 
-For each Codex session:
+Planned snippet:
 
-- sum of derived delta `input_tokens` must equal final accepted cumulative `input_tokens`
-- sum of derived delta `cached_input_tokens` must equal final accepted cumulative `cached_input_tokens`
-- sum of derived delta `output_tokens` must equal final accepted cumulative `output_tokens`
-- sum of derived delta `reasoning_output_tokens` must equal final accepted cumulative `reasoning_output_tokens`
-- sum of derived delta `total_tokens` must equal final accepted cumulative `total_tokens`
+```python
+snapshot = {
+    "timestamp": event["timestamp"],
+    "turn_id": current_turn_id,
+    "plan_type": rate_limits.get("plan_type"),
+    "input_tokens": total_usage.get("input_tokens", 0),
+    "cache_read_input_tokens": total_usage.get("cached_input_tokens", 0),
+    "output_tokens": total_usage.get("output_tokens", 0),
+    "reasoning_output_tokens": total_usage.get("reasoning_output_tokens", 0),
+    "total_tokens": total_usage.get("total_tokens", 0),
+    "model_context_window": info.get("model_context_window", 0),
+}
+```
 
-### Structural Validation
+Acceptance criteria:
 
-- cumulative totals must never decrease within a session
-- duplicate cumulative snapshots must not create extra delta rows
-- sessions without token data must not crash the dashboard
-- sessions with `turn_aborted` must still produce valid partial usage
+- snapshots are sorted by timestamp
+- duplicate cumulative snapshots can be identified deterministically
 
-## Test Cases
+### Step 4: Reconstruct Additive Codex Rows
 
-Minimum test coverage:
+Goal:
 
-1. Single-session file with unique cumulative token snapshots
-2. Session file with duplicate `token_count` snapshots
-3. Session file with null `payload.info` on the first `token_count`
-4. Session file with tool calls but no token_count
-5. Session file spanning multiple tasks
-6. Session file with `turn_aborted`
+- produce Codex rows that behave exactly like Augment additive rows
+
+Planned work:
+
+- deduplicate repeated cumulative snapshots
+- compute deltas between accepted snapshots
+- reject non-monotonic sessions or rows with negative deltas
+
+Planned snippet:
+
+```python
+delta_input = current["input_tokens"] - previous["input_tokens"]
+delta_cache = current["cache_read_input_tokens"] - previous["cache_read_input_tokens"]
+delta_output = current["output_tokens"] - previous["output_tokens"]
+delta_reasoning = current["reasoning_output_tokens"] - previous["reasoning_output_tokens"]
+delta_total = current["total_tokens"] - previous["total_tokens"]
+```
+
+Acceptance criteria:
+
+- sum of Codex delta rows equals final cumulative totals for the session
+- duplicate `token_count` events do not add extra usage
+
+### Step 5: Map Codex Rows Onto the Shared Schema
+
+Goal:
+
+- make Codex rows consumable by the same chart code as Augment where possible
+
+Planned mapping:
+
+```python
+row = {
+    "session_id": session_id,
+    "model_id": fallback_model_id,
+    "created": created_at,
+    "exchange_idx": event_idx,
+    "finished_at": snapshot_timestamp,
+    "input_tokens": delta_input,
+    "output_tokens": delta_output,
+    "cache_read_input_tokens": delta_cache,
+    "cache_creation_input_tokens": 0,
+    "system_prompt_tokens": 0,
+    "chat_history_tokens": 0,
+    "current_message_tokens": 0,
+    "max_context_tokens": model_context_window,
+    "tool_definitions_tokens": 0,
+    "tool_result_tokens": 0,
+    "assistant_response_tokens": delta_output,
+    "source": "codex",
+    "model_provider": model_provider,
+    "cwd": cwd,
+    "reasoning_output_tokens": delta_reasoning,
+    "total_tokens": delta_total,
+    "supports_cost": False,
+    "supports_token_breakdown": False,
+    "supports_precise_model_id": False,
+}
+```
+
+Important note:
+
+- the fallback `model_id` must be obviously synthetic, for example `codex-openai`
+- it must never pretend to be a precise model name
+
+Acceptance criteria:
+
+- Codex rows can be concatenated with Augment rows
+- common grouping logic still works on `session_id`, `finished_at`, and token columns
+
+### Step 6: Add Combined Loader Functions
+
+Goal:
+
+- make combined chart feeding explicit and easy to reason about
+
+Planned function signatures:
+
+```python
+def load_codex_usage(sessions_dir: str | None = None) -> pd.DataFrame: ...
+
+def load_combined_usage(
+    augment_sessions_dir: str | None = None,
+    codex_sessions_dir: str | None = None,
+    include_augment: bool = True,
+    include_codex: bool = True,
+) -> pd.DataFrame: ...
+```
+
+Planned behavior:
+
+- `load_codex_usage()` returns only normalized Codex additive rows
+- `load_combined_usage()` concatenates normalized Augment and Codex rows
+- both outputs are sorted by `finished_at`
+
+Acceptance criteria:
+
+- calling combined loader with `include_codex=False` behaves like current Augment-only flow
+
+### Step 7: Normalize Tool Usage
+
+Goal:
+
+- allow the tool usage chart to combine both sources
+
+Planned work:
+
+- keep current Augment `extract_tool_usage()`
+- add a Codex extractor over `function_call`
+- concatenate the two with a `source` column
+
+Planned snippet:
+
+```python
+tool_row = {
+    "session_id": session_id,
+    "tool_name": payload.get("name", "unknown"),
+    "count": 1,
+    "source": "codex",
+}
+```
+
+Acceptance criteria:
+
+- top tools chart can split by `source` or aggregate both
+
+### Step 8: Wire the App in Two Passes
+
+Goal:
+
+- reduce regression risk by changing app consumers gradually
+
+#### Pass 8A: Replace Only the Common Loader Input
+
+Planned change:
+
+- update `_load_and_prepare()` to optionally load combined usage rows
+- keep chart code identical at first
+
+Planned snippet:
+
+```python
+def _load_and_prepare() -> tuple[pd.DataFrame, dict, pd.DataFrame]:
+    df = load_combined_usage()
+    pricing = fetch_pricing()
+    tool_df = extract_combined_tool_usage()
+    ...
+```
+
+Guardrails:
+
+- do not include Codex rows in cost calculations
+- do not include Codex rows in prompt breakdown charts yet
+
+#### Pass 8B: Add Source-Aware Filtering and Gating
+
+Planned change:
+
+- add a `source` filter in the UI
+- branch charts only where needed
+
+Planned snippet:
+
+```python
+cost_df = dff[dff["supports_cost"]]
+breakdown_df = dff[dff["supports_token_breakdown"]]
+common_df = dff
+```
+
+Acceptance criteria:
+
+- existing Augment visuals still render correctly
+- Codex rows appear only in charts that are semantically safe
+
+### Step 9: Update Chart Logic Chart-By-Chart
+
+Goal:
+
+- explicitly decide inclusion rules instead of relying on accidental compatibility
+
+#### Combine Immediately
+
+Use `common_df`:
+
+- cards for sessions, exchanges, input, output, cache
+- token-over-time
+- session totals
+- cache efficiency
+- heatmap
+- context window
+- efficiency ratio
+- duration distribution
+- daily and weekly token totals
+- tool usage
+
+#### Gate To Augment Only
+
+Use `cost_df` or `breakdown_df`:
+
+- cost cards and charts
+- model comparison by cost
+- token breakdown stacked bar
+
+#### Pending Design Decision
+
+- model pie
+- mixed-source session tables
+- export/import schema
+
+### Step 10: Add Validation
+
+Goal:
+
+- prove Codex rows are additive and safe to mix with Augment rows
+
+Required validations:
+
+```python
+assert deltas["input_tokens"].sum() == final_snapshot["input_tokens"]
+assert deltas["cache_read_input_tokens"].sum() == final_snapshot["cache_read_input_tokens"]
+assert deltas["output_tokens"].sum() == final_snapshot["output_tokens"]
+assert deltas["reasoning_output_tokens"].sum() == final_snapshot["reasoning_output_tokens"]
+assert deltas["total_tokens"].sum() == final_snapshot["total_tokens"]
+```
+
+Required structural checks:
+
+- cumulative totals never decrease
+- duplicate snapshots do not produce extra deltas
+- empty sessions do not crash
+- `turn_aborted` sessions still produce partial valid totals
+
+### Step 11: Add Tests
+
+Minimum fixtures:
+
+1. a Codex session with unique snapshots
+2. a Codex session with duplicate `token_count`
+3. a Codex session with null `payload.info`
+4. a Codex session with tools but no token data
+5. a Codex session with `turn_aborted`
+6. a mixed Augment + Codex combined load
+
+Suggested test shape:
+
+```python
+def test_codex_deltas_match_final_totals():
+    df = load_codex_usage(sample_dir)
+    assert df["input_tokens"].sum() == EXPECTED_INPUT
+```
+
+## Rollout Order
+
+Recommended implementation order:
+
+1. schema helpers
+2. Codex raw reader
+3. cumulative snapshot extraction
+4. additive delta reconstruction
+5. Codex row mapping
+6. combined loader
+7. combined tool loader
+8. loader unit tests
+9. app wiring for common charts
+10. source-aware chart gating
+11. export/import redesign if still needed
+
+## Explicit Non-Goals For The First Implementation Pass
+
+- no pricing estimation for Codex
+- no fake Codex prompt breakdown
+- no fake precise model names for Codex
+- no team export format changes until a versioned schema is designed
+- no silent inclusion of Codex rows in cost charts
 
 ## Open Questions
 
-These should be answered before any V2 merge view:
+Questions to answer before implementation starts:
 
-- Is there a reliable Codex model identifier available elsewhere in logs?
-- Should `reasoning_output_tokens` be shown as a separate card only, or also included in advanced tables?
-- Should a future combined view compare only common fields:
-  - `input_tokens`
-  - `output_tokens`
-  - cached input
-  and leave source-specific fields separate?
+1. Do we want the default dashboard view to show combined sources, or keep a source filter defaulted to `augment` first?
+2. Should the model pie chart hide Codex rows entirely until a true model id exists?
+3. Should `reasoning_output_tokens` get its own card in the shared header, or live only in Codex-specific sections?
+4. Do we want combined tables to display a `source` column by default?
 
 ## Decision Summary
 
+The key design decision is:
+
+- Codex integration must produce additive rows that match the Augment accounting model
+
 The key implementation decision is:
 
-- Codex aggregation must be based on deduplicated cumulative `total_token_usage` snapshots, not on raw `last_token_usage`
+- derive those rows from deduplicated cumulative `total_token_usage` snapshots, not from raw `last_token_usage`
 
-That is the only approach that preserves the same additive accounting model used today for Augment.
+The key rollout decision is:
+
+- combine only semantically compatible charts first, and gate the rest through explicit metadata instead of approximation
